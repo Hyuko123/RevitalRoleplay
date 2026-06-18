@@ -1,0 +1,44 @@
+# ============================================================
+#  FICHIERS À NE PAS ENVOYER SUR GITHUB
+# ============================================================
+
+# Fichier contenant le token Discord et les secrets
+.env
+config.py
+
+# Fichiers Python compilés
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Données sensibles du bot
+data/
+*.json
+
+# Logs
+*.log
+
+# Environnements virtuels
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Transcripts des tickets
+data/transcripts/
+
+# Made with Bob
+GUIDE_TOKEN_DISCORD.md 
