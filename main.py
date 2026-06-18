@@ -522,4 +522,10 @@ async def check_mutes():
 
 if __name__ == "__main__":
     create_data_files()
-    bot.run(TOKEN)  # À REMPLACER PAR TON TOKEN
+    
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ ERREUR: DISCORD_TOKEN non défini !")
+        exit(1)
+    
+    bot.run(token)
