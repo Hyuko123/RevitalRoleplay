@@ -522,4 +522,4 @@ async def check_mutes():
 
 if __name__ == "__main__":
     create_data_files()
-    bot.run("YOUR_TOKEN_HERE")  # À REMPLACER PAR TON TOKEN
+    bot.run(TOKEN)  # À REMPLACER PAR TON TOKEN
