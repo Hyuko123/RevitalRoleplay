@@ -1,877 +1,1483 @@
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import tasks
 import json
 import os
 from datetime import datetime, timedelta
 import asyncio
 import random
 import string
+from config import (
+    TOKEN, GUILD_ID,
+    LOGS_CHANNEL, LOGS_WL_CHANNEL, LOGS_TICKETS_CHANNEL, LOGS_REMBOURSEMENT_CHANNEL,
+    VERIFICATION_CHANNEL, WELCOME_CHANNEL,
+    CITOYEN_WL_ROLE, MUTED_ROLE, UNVERIFIED_ROLE, VERIFIED_ROLE,
+    STAFF_ROLE,
+    TICKET_CATEGORY_ID,
+    TICKET_CHANNELS,
+)
 
-# Configuration
+# ======================================================
+#  INTENTS & BOT
+# ======================================================
+
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
 intents.message_content = True
-intents.reactions = True
 
-bot = commands.Bot(command_prefix="?", intents=intents)
+bot = discord.Client(intents=intents)
+tree = app_commands.CommandTree(bot)
 
-# ========== CONFIGURATION SERVEUR ==========
-GUILD_ID = 123456789  # À REMPLACER
-LOGS_CHANNEL = 987654321  # Canal logs modération
-LOGS_WL_CHANNEL = 987654322  # Canal logs whitelist
-TICKETS_CHANNEL = 987654323  # Canal création tickets
-VERIFICATION_CHANNEL = 987654324  # Canal vérification
+# ======================================================
+#  DONNÉES JSON
+# ======================================================
 
-CITOYEN_WL_ROLE = 987654325  # Rôle à assigner
-MUTED_ROLE = 987654326  # Rôle pour les mute
-VERIFIED_ROLE = 987654327  # Rôle pour les vérifiés
+DATA_FILES = {
+    "data/warns.json":     {},
+    "data/mutes.json":     {},
+    "data/whitelist.json": {},
+    "data/tickets.json":   {},
+    "data/captchas.json":  {},
+    "data/sanctions.json": {},
+    "data/ticket_counter.json": {"count": 0},
+    "data/remboursements.json": {},
+}
 
-# ========== FICHIERS DE DONNÉES ==========
 def create_data_files():
     os.makedirs("data", exist_ok=True)
-    
-    files = {
-        "data/warns.json": {},
-        "data/mutes.json": {},
-        "data/whitelist.json": {},
-        "data/tickets.json": {},
-        "data/captchas.json": {}
-    }
-    
-    for file, default in files.items():
-        if not os.path.exists(file):
-            with open(file, 'w') as f:
-                json.dump(default, f, indent=2)
+    os.makedirs("data/transcripts", exist_ok=True)
+    for path, default in DATA_FILES.items():
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(default, f, indent=2, ensure_ascii=False)
 
-def load_data(file):
+def load_data(path: str):
     try:
-        with open(file, 'r') as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
-def save_data(file, data):
-    with open(file, 'w') as f:
-        json.dump(data, f, indent=2)
+def save_data(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-# ========== ÉVÉNEMENTS ==========
+def next_ticket_number() -> int:
+    counter = load_data("data/ticket_counter.json")
+    n = counter.get("count", 0) + 1
+    save_data("data/ticket_counter.json", {"count": n})
+    return n
+
+# ======================================================
+#  HELPERS
+# ======================================================
+
+def parse_duration(time_str: str) -> int | None:
+    """Convertit '1h', '30m', '7d' en secondes. Retourne None si invalide."""
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        amount = int(time_str[:-1])
+        unit = time_str[-1].lower()
+        return amount * multipliers[unit]
+    except Exception:
+        return None
+
+def fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m"
+    elif seconds < 86400:
+        return f"{seconds // 3600}h"
+    else:
+        return f"{seconds // 86400}j"
+
+def is_staff(interaction: discord.Interaction) -> bool:
+    """Vérifie si l'utilisateur possède le rôle STAFF_ROLE (1516284938645798953)."""
+    staff_role = interaction.guild.get_role(STAFF_ROLE)
+    return staff_role is not None and staff_role in interaction.user.roles
+
+CATEGORY_LABELS = {
+    "boutique":    "💎 Boutique / Remboursement",
+    "superviseur": "⚜️ Superviseur",
+    "recrutement": "🔵 Recrutement Staff",
+    "legal":       "🟢 Dossier Légal",
+    "illegal":     "🔴 Dossier Illégal",
+    "wiperp":      "💀 Wipe / Mort RP",
+}
+
+# ======================================================
+#  TRANSCRIPT HTML
+# ======================================================
+
+async def generate_transcript(channel: discord.TextChannel) -> str:
+    """Génère un fichier HTML avec l'historique du ticket."""
+    messages = []
+    async for msg in channel.history(limit=500, oldest_first=True):
+        messages.append(msg)
+
+    rows = ""
+    for msg in messages:
+        avatar = msg.author.display_avatar.url if msg.author.display_avatar else ""
+        ts = msg.created_at.strftime("%d/%m/%Y %H:%M")
+        content = discord.utils.escape_mentions(msg.content or "")
+        # Embeds
+        embed_html = ""
+        for emb in msg.embeds:
+            title = emb.title or ""
+            desc = emb.description or ""
+            embed_html += f'<div class="embed"><b>{title}</b><br>{desc}</div>'
+        rows += f"""
+        <div class="message">
+            <img class="avatar" src="{avatar}" alt="">
+            <div class="content">
+                <span class="author">{msg.author.display_name}</span>
+                <span class="timestamp">{ts}</span>
+                <div class="text">{content}{embed_html}</div>
+            </div>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Transcript - {channel.name}</title>
+<style>
+  body {{ font-family: 'Segoe UI', sans-serif; background: #36393f; color: #dcddde; margin: 0; padding: 20px; }}
+  h1 {{ color: #ffffff; border-bottom: 2px solid #5865f2; padding-bottom: 8px; }}
+  .message {{ display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid #40444b; }}
+  .avatar {{ width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; }}
+  .author {{ font-weight: bold; color: #ffffff; margin-right: 8px; }}
+  .timestamp {{ font-size: 0.75em; color: #72767d; }}
+  .text {{ margin-top: 4px; white-space: pre-wrap; }}
+  .embed {{ background: #2f3136; border-left: 4px solid #5865f2; padding: 8px 12px; margin-top: 6px; border-radius: 4px; }}
+</style>
+</head>
+<body>
+<h1>📋 Transcript — #{channel.name}</h1>
+<p style="color:#72767d">Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
+{rows}
+</body>
+</html>"""
+
+    path = f"data/transcripts/{channel.name}.html"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return path
+
+# ======================================================
+#  (AutoMod désactivé — les warns sont purement visuels)
+# ======================================================
+
+# ======================================================
+#  ██████╗ TICKETS
+# ======================================================
+
+class TicketCategorySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="💎 Boutique / Remboursement", value="boutique",    description="Problème d'achat, remboursement, item manquant"),
+            discord.SelectOption(label="⚜️ Superviseur",              value="superviseur", description="Contacter un superviseur"),
+            discord.SelectOption(label="🔵 Recrutement Staff",        value="recrutement", description="Candidature ou question recrutement"),
+            discord.SelectOption(label="🟢 Dossier Légal",            value="legal",       description="Affaire légale RP"),
+            discord.SelectOption(label="🔴 Dossier Illégal",          value="illegal",     description="Affaire criminelle / illégale RP"),
+            discord.SelectOption(label="💀 Wipe / Mort RP",           value="wiperp",      description="Demande de wipe ou mort RP officielle"),
+        ]
+        super().__init__(placeholder="📂 Choisir la catégorie du ticket...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        category = self.values[0]
+        guild = interaction.guild
+        creator = interaction.user
+        ticket_num = next_ticket_number()
+
+        # Catégorie Discord cible
+        ticket_category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+
+        # Overwrites : seul le créateur + staff voient le salon
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            creator: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        }
+        staff_role = guild.get_role(STAFF_ROLE)
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        # Si un salon spécifique est configuré pour cette catégorie, override
+        target_cat_id = TICKET_CHANNELS.get(category)
+        target_category = guild.get_channel(target_cat_id) if target_cat_id else ticket_category
+
+        channel = await guild.create_text_channel(
+            name=f"{category}-{ticket_num:04d}-{creator.name[:10]}",
+            category=target_category,
+            overwrites=overwrites,
+            topic=f"Ticket #{ticket_num:04d} • {CATEGORY_LABELS[category]} • Créé par {creator.name}"
+        )
+
+        # Enregistrement
+        tickets = load_data("data/tickets.json")
+        tickets[str(channel.id)] = {
+            "number":       ticket_num,
+            "creator_id":   creator.id,
+            "creator_name": creator.name,
+            "category":     category,
+            "status":       "open",
+            "claimed_by":   None,
+            "created_at":   datetime.now().isoformat(),
+            "closed_at":    None,
+            "messages":     [],
+        }
+        save_data("data/tickets.json", tickets)
+
+        # Embed d'accueil
+        embed = discord.Embed(
+            title=f"🎫 Ticket #{ticket_num:04d} — {CATEGORY_LABELS[category]}",
+            description=(
+                f"Bienvenue {creator.mention} !\n\n"
+                f"Un membre du staff prendra en charge ta demande rapidement.\n"
+                f"**Décris ton problème en détail** ci-dessous.\n\n"
+                f"_Pour fermer ce ticket, clique sur le bouton rouge._"
+            ),
+            color=discord.Color.blurple(),
+            timestamp=datetime.now()
+        )
+        embed.set_footer(text=f"Revital RP • {CATEGORY_LABELS[category]}")
+
+        view = TicketPanelView(channel.id)
+        await channel.send(embed=embed, view=view)
+        await channel.send(f"{creator.mention}", delete_after=2)
+
+        # Log création
+        log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
+        if log_ch:
+            log_embed = discord.Embed(
+                title="🎫 Nouveau Ticket",
+                description=f"**#{ticket_num:04d}** créé par {creator.mention}\nCatégorie: {CATEGORY_LABELS[category]}\nSalon: {channel.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            await log_ch.send(embed=log_embed)
+
+        await interaction.followup.send(f"✅ Ton ticket a été créé : {channel.mention}", ephemeral=True)
+
+
+class TicketOpenView(discord.ui.View):
+    """Vue persistante affichée dans le salon #tickets."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketCategorySelect())
+
+
+class TicketPanelView(discord.ui.View):
+    """Panel de contrôle dans le salon du ticket."""
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="✅ Claim", style=discord.ButtonStyle.green, custom_id="ticket_claim")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+            return
+        tickets = load_data("data/tickets.json")
+        key = str(interaction.channel.id)
+        if key not in tickets:
+            await interaction.response.send_message("❌ Ticket introuvable.", ephemeral=True)
+            return
+        tickets[key]["claimed_by"] = interaction.user.id
+        tickets[key]["claimed_by_name"] = interaction.user.name
+        save_data("data/tickets.json", tickets)
+        await interaction.response.send_message(
+            f"✅ **{interaction.user.mention}** a pris en charge ce ticket.", ephemeral=False
+        )
+
+    @discord.ui.button(label="👤 Ajouter membre", style=discord.ButtonStyle.blurple, custom_id="ticket_add_member")
+    async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+            return
+        modal = AddMemberModal(interaction.channel)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="🔄 Réassigner", style=discord.ButtonStyle.grey, custom_id="ticket_reassign")
+    async def reassign(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+            return
+        modal = ReassignModal(interaction.channel)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="📋 Transcript", style=discord.ButtonStyle.grey, custom_id="ticket_transcript")
+    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        path = await generate_transcript(interaction.channel)
+        await interaction.followup.send(
+            "📋 Voici le transcript :", file=discord.File(path), ephemeral=True
+        )
+
+    @discord.ui.button(label="🔒 Fermer", style=discord.ButtonStyle.red, custom_id="ticket_close")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tickets = load_data("data/tickets.json")
+        key = str(interaction.channel.id)
+        if key not in tickets:
+            await interaction.response.send_message("❌ Ticket introuvable.", ephemeral=True)
+            return
+
+        ticket_data = tickets[key]
+        creator = interaction.guild.get_member(ticket_data["creator_id"])
+
+        # Confirmation
+        confirm_view = TicketCloseConfirmView(interaction.channel, ticket_data)
+        await interaction.response.send_message(
+            "⚠️ Es-tu sûr de vouloir fermer ce ticket ?",
+            view=confirm_view,
+            ephemeral=True
+        )
+
+
+class TicketCloseConfirmView(discord.ui.View):
+    def __init__(self, channel: discord.TextChannel, ticket_data: dict):
+        super().__init__(timeout=60)
+        self.channel = channel
+        self.ticket_data = ticket_data
+
+    @discord.ui.button(label="✅ Confirmer la fermeture", style=discord.ButtonStyle.red)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        # Transcript
+        path = await generate_transcript(self.channel)
+
+        # Mise à jour données
+        tickets = load_data("data/tickets.json")
+        key = str(self.channel.id)
+        if key in tickets:
+            tickets[key]["status"] = "closed"
+            tickets[key]["closed_at"] = datetime.now().isoformat()
+            tickets[key]["closed_by"] = interaction.user.name
+        save_data("data/tickets.json", tickets)
+
+        # Log fermeture
+        log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
+        if log_ch:
+            embed = discord.Embed(
+                title="🔒 Ticket Fermé",
+                description=(
+                    f"**#{self.ticket_data.get('number', '?'):04d}** — {CATEGORY_LABELS.get(self.ticket_data.get('category', ''), '?')}\n"
+                    f"Créé par : **{self.ticket_data.get('creator_name', '?')}**\n"
+                    f"Fermé par : **{interaction.user.name}**\n"
+                    f"Pris en charge par : **{self.ticket_data.get('claimed_by_name', 'Non assigné')}**"
+                ),
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            await log_ch.send(embed=embed, file=discord.File(path))
+
+        await self.channel.delete(reason=f"Ticket fermé par {interaction.user.name}")
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.grey)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Fermeture annulée.", ephemeral=True)
+        self.stop()
+
+
+class AddMemberModal(discord.ui.Modal, title="Ajouter un membre au ticket"):
+    user_id = discord.ui.TextInput(label="ID Discord du membre", placeholder="123456789012345678", required=True)
+
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            member = await interaction.guild.fetch_member(int(self.user_id.value.strip()))
+            await self.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+            await interaction.response.send_message(f"✅ **{member.mention}** a été ajouté au ticket.", ephemeral=False)
+        except Exception:
+            await interaction.response.send_message("❌ Membre introuvable. Vérifie l'ID.", ephemeral=True)
+
+
+class ReassignModal(discord.ui.Modal, title="Réassigner le ticket"):
+    user_id = discord.ui.TextInput(label="ID Discord du staff", placeholder="123456789012345678", required=True)
+
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            member = await interaction.guild.fetch_member(int(self.user_id.value.strip()))
+            tickets = load_data("data/tickets.json")
+            key = str(self.channel.id)
+            if key in tickets:
+                tickets[key]["claimed_by"] = member.id
+                tickets[key]["claimed_by_name"] = member.name
+                save_data("data/tickets.json", tickets)
+            await self.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+            await interaction.response.send_message(
+                f"🔄 Ticket réassigné à **{member.mention}**.", ephemeral=False
+            )
+        except Exception:
+            await interaction.response.send_message("❌ Membre introuvable.", ephemeral=True)
+
+
+# ======================================================
+#  ██╗    ██╗██╗  ██╗██╗████████╗███████╗██╗     ██╗███████╗████████╗
+#  ██║    ██║██║  ██║██║╚══██╔══╝██╔════╝██║     ██║██╔════╝╚══██╔══╝
+#  ██║ █╗ ██║███████║██║   ██║   █████╗  ██║     ██║███████╗   ██║
+#  ██║███╗██║██╔══██║██║   ██║   ██╔══╝  ██║     ██║╚════██║   ██║
+#  ╚███╔███╔╝██║  ██║██║   ██║   ███████╗███████╗██║███████║   ██║
+#   ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚══════╝   ╚═╝
+# ======================================================
+
+WL_ROLES = {
+    "legal":   "Citoyen légal",
+    "illegal": "Criminel / Illégal",
+}
+
+class WhitelistStep1Modal(discord.ui.Modal, title="Whitelist — Étape 1 / 2 : Infos RP"):
+    nom_rp    = discord.ui.TextInput(label="Nom & Prénom RP",       placeholder="Jean Dupont",         required=True, max_length=80)
+    age_rp    = discord.ui.TextInput(label="Âge du personnage",     placeholder="28",                  required=True, max_length=3)
+    notes     = discord.ui.TextInput(label="Notes du staff (optionnel)", placeholder="Comportement, points forts...", required=False, max_length=300, style=discord.TextStyle.paragraph)
+
+    def __init__(self, member: discord.Member):
+        super().__init__()
+        self.member = member
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Passer les données à l'étape 2
+        view = WhitelistStep2View(
+            self.member,
+            {
+                "nom_rp":     self.nom_rp.value,
+                "age_rp":     self.age_rp.value,
+                "background": "",
+                "notes":      self.notes.value,
+            }
+        )
+        embed = discord.Embed(
+            title="📋 Whitelist — Étape 2 / 2 : Évaluation",
+            description=(
+                f"**Joueur :** {self.member.mention} (`{self.member.id}`)\n"
+                f"**Nom RP :** {self.nom_rp.value}\n\n"
+                "Sélectionne les évaluations ci-dessous puis clique **Soumettre**."
+            ),
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class WhitelistStep2View(discord.ui.View):
+    def __init__(self, member: discord.Member, step1_data: dict):
+        super().__init__(timeout=300)
+        self.member    = member
+        self.step1     = step1_data
+        self.type_wl   = None   # legal / illegal
+        self.background_ok = None
+        self.reglement_ok  = None
+        self.decision       = None
+
+    @discord.ui.select(
+        placeholder="Type de personnage",
+        options=[
+            discord.SelectOption(label="⚖️ Légal",   value="legal",   description="Citoyen, commerçant..."),
+            discord.SelectOption(label="🔫 Illégal", value="illegal", description="Criminel, gang..."),
+        ]
+    )
+    async def select_type(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.type_wl = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="Background validé ?",
+        options=[
+            discord.SelectOption(label="✅ Background OK",      value="ok"),
+            discord.SelectOption(label="❌ Background insuffisant", value="non-ok"),
+        ]
+    )
+    async def select_background(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.background_ok = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="Règlement connu ?",
+        options=[
+            discord.SelectOption(label="✅ Règlement maîtrisé",  value="ok"),
+            discord.SelectOption(label="❌ Règlement insuffisant", value="non-ok"),
+        ]
+    )
+    async def select_reglement(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.reglement_ok = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="Décision finale",
+        options=[
+            discord.SelectOption(label="✅ ACCEPTÉ",  value="accepte",  emoji="✅"),
+            discord.SelectOption(label="❌ REFUSÉ",   value="refuse",   emoji="❌"),
+            discord.SelectOption(label="⏳ EN ATTENTE", value="attente", emoji="⏳"),
+        ]
+    )
+    async def select_decision(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.decision = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="📨 Soumettre la Whitelist", style=discord.ButtonStyle.green, row=4)
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not all([self.type_wl, self.background_ok, self.reglement_ok, self.decision]):
+            await interaction.response.send_message("❌ Tu dois remplir **tous** les champs avant de soumettre.", ephemeral=True)
+            return
+
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+            return
+
+        # Enregistrement
+        wl_data = load_data("data/whitelist.json")
+        user_key = str(self.member.id)
+
+        # Historique : on conserve les anciennes entrées
+        if user_key not in wl_data:
+            wl_data[user_key] = {"entries": [], "current": None}
+
+        entry = {
+            "nom_rp":       self.step1["nom_rp"],
+            "age_rp":       self.step1["age_rp"],
+            "background":   self.step1["background"],
+            "type_wl":      self.type_wl,
+            "background_ok": self.background_ok,
+            "reglement_ok": self.reglement_ok,
+            "decision":     self.decision,
+            "notes":        self.step1["notes"],
+            "moderator":    interaction.user.name,
+            "moderator_id": interaction.user.id,
+            "date":         datetime.now().isoformat(),
+        }
+
+        wl_data[user_key]["entries"].append(entry)
+        wl_data[user_key]["current"] = entry
+        save_data("data/whitelist.json", wl_data)
+
+        # Gestion du rôle
+        if self.decision == "accepte":
+            wl_role = interaction.guild.get_role(CITOYEN_WL_ROLE)
+            if wl_role:
+                try:
+                    await self.member.add_roles(wl_role)
+                except Exception:
+                    pass
+
+        # Couleur selon décision
+        colors = {"accepte": discord.Color.green(), "refuse": discord.Color.red(), "attente": discord.Color.gold()}
+        icons  = {"accepte": "✅", "refuse": "❌", "attente": "⏳"}
+
+        # Log #logs-wl
+        log_embed = discord.Embed(
+            title=f"{icons[self.decision]} Whitelist {self.decision.upper()} — {self.step1['nom_rp']}",
+            color=colors[self.decision],
+            timestamp=datetime.now()
+        )
+        log_embed.add_field(name="👤 Joueur",        value=f"{self.member.mention} (`{self.member.id}`)", inline=False)
+        log_embed.add_field(name="🎭 Nom RP",        value=self.step1["nom_rp"],        inline=True)
+        log_embed.add_field(name="🎂 Âge RP",        value=self.step1["age_rp"],        inline=True)
+        log_embed.add_field(name="⚖️ Type",          value=WL_ROLES.get(self.type_wl, self.type_wl), inline=True)
+        log_embed.add_field(name="📖 Background",    value="✅ OK" if self.background_ok == "ok" else "❌ NON", inline=True)
+        log_embed.add_field(name="📜 Règlement",     value="✅ OK" if self.reglement_ok == "ok" else "❌ NON", inline=True)
+        if self.step1["notes"]:
+            log_embed.add_field(name="🗒️ Notes staff", value=self.step1["notes"], inline=False)
+        log_embed.add_field(name="👮 Modérateur",    value=interaction.user.mention, inline=False)
+        log_embed.set_thumbnail(url=self.member.display_avatar.url)
+        log_embed.set_footer(text=f"Entrée #{len(wl_data[user_key]['entries'])} pour ce joueur")
+
+        logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
+        if logs_wl:
+            await logs_wl.send(embed=log_embed)
+
+        await interaction.response.send_message(
+            f"{icons[self.decision]} Whitelist de {self.member.mention} : **{self.decision.upper()}**",
+            ephemeral=True
+        )
+
+# ======================================================
+#  DICTIONNAIRE COULEURS POUR BROADCAST
+# ======================================================
+
+ANNONCE_COLORS = {
+    "Bleu": discord.Color.blue(),
+    "Vert": discord.Color.green(),
+    "Rouge": discord.Color.red(),
+    "Orange": discord.Color.orange(),
+    "Violet": discord.Color.purple(),
+    "Jaune": discord.Color.gold(),
+    "Bleu Clair": discord.Color.blurple(),
+}
+
+
+# ======================================================
+#  MODAL & COMMANDE BROADCAST
+# ======================================================
+
+class AnnonceModal(discord.ui.Modal, title="📢 Créer un Broadcast"):
+    titre = discord.ui.TextInput(
+        label="Titre de l'annonce",
+        placeholder="Ex: Maintenance serveur",
+        required=True,
+        max_length=256
+    )
+    
+    message = discord.ui.TextInput(
+        label="Message principal",
+        placeholder="Votre message ici...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=4000
+    )
+    
+    image_url = discord.ui.TextInput(
+        label="URL de l'image (optionnel)",
+        placeholder="https://exemple.com/image.png",
+        required=False,
+        max_length=500
+    )
+    
+    couleur = discord.ui.TextInput(
+        label="Couleur (Bleu/Vert/Rouge/Orange/Violet/Jaune)",
+        placeholder="Bleu",
+        required=False,
+        max_length=20,
+        default="Bleu"
+    )
+    
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            color_name = self.couleur.value.strip().capitalize()
+            color = ANNONCE_COLORS.get(color_name, discord.Color.blue())
+
+            embed = discord.Embed(
+                title=f"📢 {self.titre.value}",
+                description=self.message.value,
+                color=color,
+                timestamp=datetime.now()
+            )
+
+            if self.image_url.value and self.image_url.value.strip():
+                embed.set_image(url=self.image_url.value.strip())
+
+            if interaction.guild and interaction.guild.icon:
+                embed.set_thumbnail(url=interaction.guild.icon.url)
+
+            embed.set_footer(
+                text=f"📣 Annonce officielle • Par {interaction.user.name}",
+                icon_url=interaction.user.display_avatar.url
+            )
+
+            await self.channel.send(embed=embed)
+            await interaction.response.send_message(
+                f"✅ Broadcast envoyé dans {self.channel.mention}",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Erreur : {str(e)}",
+                ephemeral=True
+            )
+
+
+@tree.command(
+    name="bc",
+    description="Envoyer un broadcast dans un salon"
+)
+@app_commands.describe(
+    salon="Le salon où envoyer le broadcast"
+)
+async def bc(interaction: discord.Interaction, salon: discord.TextChannel):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    
+    modal = AnnonceModal(salon)
+    await interaction.response.send_modal(modal)
+
+# ======================================================
+#  SYSTÈME DE REMBOURSEMENT
+# ======================================================
+
+class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
+    nom_prenom_rp = discord.ui.TextInput(
+        label="Nom Prénom RP (ID Discord)",
+        placeholder="Ex: John Doe (123456789012345678)",
+        required=True,
+        max_length=150
+    )
+    
+    date_heure = discord.ui.TextInput(
+        label="Date et Heure",
+        placeholder="Ex: 18/06/2026 à 14h30",
+        required=True,
+        max_length=100
+    )
+    
+    note_remboursement = discord.ui.TextInput(
+        label="Note de remboursement",
+        placeholder="Raison du remboursement...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        # Enregistrer le remboursement
+        remboursements = load_data("data/remboursements.json")
+        
+        timestamp = datetime.now().isoformat()
+        entry = {
+            "nom_prenom_rp": self.nom_prenom_rp.value,
+            "date_heure": self.date_heure.value,
+            "note": self.note_remboursement.value,
+            "staff_name": interaction.user.name,
+            "staff_id": interaction.user.id,
+            "date_creation": timestamp,
+        }
+        
+        # Utiliser le timestamp comme clé unique
+        if "all" not in remboursements:
+            remboursements["all"] = []
+        
+        remboursements["all"].append(entry)
+        save_data("data/remboursements.json", remboursements)
+        
+        # Créer l'embed pour les logs
+        embed = discord.Embed(
+            title="💰 Nouveau Remboursement",
+            color=discord.Color.gold(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="🎭 Nom Prénom RP", value=self.nom_prenom_rp.value, inline=False)
+        embed.add_field(name="📅 Date et Heure", value=self.date_heure.value, inline=True)
+        embed.add_field(name="📝 Note", value=self.note_remboursement.value, inline=False)
+        embed.add_field(name="👮 Traité par", value=f"{interaction.user.mention}", inline=False)
+        embed.set_footer(text=f"Remboursement #{len(remboursements['all'])}")
+        
+        # Envoyer dans le salon de logs
+        logs_channel = bot.get_channel(LOGS_REMBOURSEMENT_CHANNEL)
+        if logs_channel:
+            await logs_channel.send(embed=embed)
+        
+        # Confirmer à l'utilisateur
+        await interaction.response.send_message(
+            f"✅ Remboursement enregistré",
+            ephemeral=True
+        )
+
+
+@tree.command(
+    name="remboursement",
+    description="Créer une demande de remboursement"
+)
+async def remboursement(interaction: discord.Interaction):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    
+    modal = RemboursementModal()
+    await interaction.response.send_modal(modal)
+    
+
+# ======================================================
+#  COMMANDE — CLEAR MESSAGES
+# ======================================================
+
+@tree.command(
+    name="clear",
+    description="Supprimer un nombre de messages dans le salon actuel"
+)
+@app_commands.describe(
+    nombre="Nombre de messages à supprimer (1-100)"
+)
+async def clear(interaction: discord.Interaction, nombre: int):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    
+    # Vérifier que le nombre est valide
+    if nombre < 1 or nombre > 100:
+        await interaction.response.send_message(
+            "❌ Le nombre doit être entre 1 et 100.",
+            ephemeral=True
+        )
+        return
+    
+    # Répondre immédiatement pour éviter le timeout
+    await interaction.response.send_message(
+        f"🗑️ Suppression de {nombre} message(s) en cours...",
+        ephemeral=True
+    )
+    
+    try:
+        # Supprimer les messages
+        deleted = await interaction.channel.purge(limit=nombre)
+        
+        # Envoyer un message de confirmation (qui s'auto-supprimera)
+        confirm_msg = await interaction.channel.send(
+            f"✅ {len(deleted)} message(s) supprimé(s) par {interaction.user.mention}"
+        )
+        
+        # Supprimer le message de confirmation après 5 secondes
+        await asyncio.sleep(5)
+        await confirm_msg.delete()
+        
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Erreur lors de la suppression : {str(e)}",
+            ephemeral=True
+        )
+
+# ======================================================
+#  ÉVÉNEMENTS
+# ======================================================
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot connecté en tant que {bot.user}")
-    check_mutes.start()
-    await bot.change_presence(activity=discord.Game(name="Revital RP"))
-    
-    # Sync slash commands with Discord on startup
+    print(f"✅ Bot connecté : {bot.user}")
+
     try:
-        synced = await bot.tree.sync()
-        print(f"✅ {len(synced)} commande(s) slash synchronisée(s) avec Discord")
+        # Synchroniser sur le serveur spécifique (apparition instantanée)
+        guild = discord.Object(id=GUILD_ID)
+        tree.copy_global_to(guild=guild)
+        synced = await tree.sync(guild=guild)
+
+        print(f"✅ {len(synced)} commandes synchronisées sur le serveur")
+
         for cmd in synced:
-            print(f"  ➜ /{cmd.name}")
+            print(f"➜ /{cmd.name}")
+
     except Exception as e:
-        print(f"❌ Erreur lors de la synchronisation des commandes slash: {e}")
+        print(f"❌ Erreur sync : {e}")
+
+    if not check_mutes.is_running():
+        check_mutes.start()
+
+    await bot.change_presence(
+        activity=discord.Game(name="Revital RP")
+    )
 
 @bot.event
-async def on_member_join(member):
-    """Envoie le captcha au nouveau membre"""
-    guild = member.guild
+async def on_member_join(member: discord.Member):
+    """Assigne le rôle non-vérifié, envoie le captcha et message de bienvenue."""
     try:
-        embed = discord.Embed(
-            title="🔐 Vérification Revital RP",
-            description="Bienvenue sur le serveur ! Pour accéder au serveur, tu dois compléter la vérification.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Instructions", value="Clique sur le bouton ci-dessous pour obtenir ton captcha", inline=False)
+        # 1. Assigner le rôle non-vérifié
+        unverified_role = member.guild.get_role(UNVERIFIED_ROLE)
+        if unverified_role:
+            await member.add_roles(unverified_role)
+            print(f"✅ Rôle non-vérifié assigné à {member.name}")
         
-        view = VerificationView(member)
-        await member.send(embed=embed, view=view)
-    except:
-        print(f"❌ Impossible d'envoyer un DM à {member}")
-
-# ========== VUES (BUTTONS) ==========
-
-class VerificationView(discord.ui.View):
-    def __init__(self, member):
-        super().__init__(timeout=None)
-        self.member = member
-    
-    @discord.ui.button(label="Obtenir le Captcha", style=discord.ButtonStyle.green)
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        # 2. Message de bienvenue dans le salon dédié
+        welcome_channel = bot.get_channel(WELCOME_CHANNEL)
+        if welcome_channel:
+            welcome_embed = discord.Embed(
+                title="👋 Bienvenue sur Revital RP !",
+                description=(
+                    f"**{member.mention}** vient de rejoindre le serveur !\n\n"
+                    f"🎉 Nous sommes maintenant **{member.guild.member_count}** membres !\n\n"
+                    f"N'oublie pas de te vérifier dans <#{VERIFICATION_CHANNEL}> pour accéder au serveur."
+                ),
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            welcome_embed.set_thumbnail(url=member.display_avatar.url)
+            welcome_embed.set_footer(text="Revital RP • Bienvenue !")
+            
+            await welcome_channel.send(
+                content=f"👋 {member.mention}",
+                embed=welcome_embed
+            )
         
-        # Génère un captcha
+        # 3. Générer le captcha
+        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
+        if not verification_channel:
+            return
+
         captcha_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        
         captchas = load_data("data/captchas.json")
-        captchas[str(self.member.id)] = {
-            "code": captcha_code,
-            "created": datetime.now().isoformat(),
+        captchas[str(member.id)] = {
+            "code":     captcha_code,
+            "created":  datetime.now().isoformat(),
             "attempts": 0
         }
         save_data("data/captchas.json", captchas)
-        
+
+        # 4. Envoyer le captcha avec ping
         embed = discord.Embed(
-            title="🔐 Code de Vérification",
-            description=f"Ton code de vérification est: **{captcha_code}**\n\nEntre ce code avec la commande:\n`?verify {captcha_code}`",
-            color=discord.Color.blue()
+            title="🔐 Vérification — Revital RP",
+            description=(
+                f"Bienvenue {member.mention} sur **Revital RP** !\n\n"
+                f"Pour accéder au serveur, tu dois te vérifier.\n\n"
+                f"📋 **Ton code de vérification :** `{captcha_code}`\n\n"
+                f"✅ **Utilise la commande :**\n"
+                f"```/verify {captcha_code}```\n\n"
+                f"⏱️ _Ce code est valable 30 minutes._"
+            ),
+            color=discord.Color.blurple(),
+            timestamp=datetime.now()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="Revital RP • Système de vérification automatique")
+        
+        await verification_channel.send(
+            content=f"👋 {member.mention}",
+            embed=embed
         )
         
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-class TicketView(discord.ui.View):
-    def __init__(self, bot):
-        super().__init__(timeout=None)
-        self.bot = bot
-    
-    @discord.ui.button(label="📩 Créer un Ticket", style=discord.ButtonStyle.blurple)
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        
-        tickets = load_data("data/tickets.json")
-        ticket_num = len(tickets) + 1
-        
-        # Crée le channel
-        channel = await guild.create_text_channel(
-            name=f"ticket-{ticket_num}",
-            category=None
-        )
-        
-        tickets[str(channel.id)] = {
-            "creator": interaction.user.id,
-            "created": datetime.now().isoformat(),
-            "status": "open"
-        }
-        save_data("data/tickets.json", tickets)
-        
-        embed = discord.Embed(
-            title=f"📩 Ticket #{ticket_num}",
-            description=f"Ticket créé par {interaction.user.mention}",
-            color=discord.Color.blurple()
-        )
-        
-        view = TicketCloseView()
-        await channel.send(embed=embed, view=view)
-        
-        await interaction.response.send_message(f"✅ Ticket créé: {channel.mention}", ephemeral=True)
-
-class TicketCloseView(discord.ui.View):
-    @discord.ui.button(label="Fermer le Ticket", style=discord.ButtonStyle.red)
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tickets = load_data("data/tickets.json")
-        
-        if str(interaction.channel.id) in tickets:
-            del tickets[str(interaction.channel.id)]
-            save_data("data/tickets.json", tickets)
-        
-        await interaction.response.defer()
-        await interaction.channel.delete()
-
-# ========== COMMANDE SYNC ==========
-
-@bot.command(name="sync")
-@commands.has_permissions(administrator=True)
-async def sync(ctx):
-    """Synchronise manuellement les commandes slash avec Discord (?sync)"""
-    await ctx.send("🔄 Synchronisation des commandes slash en cours...")
-    try:
-        synced = await bot.tree.sync()
-        await ctx.send(f"✅ {len(synced)} commande(s) slash synchronisée(s) avec Discord.")
-        print(f"✅ Sync manuel: {len(synced)} commande(s) synchronisée(s) par {ctx.author}")
     except Exception as e:
-        await ctx.send(f"❌ Erreur lors de la synchronisation: {e}")
-        print(f"❌ Erreur sync manuel: {e}")
+        print(f"[on_member_join] Erreur : {e}")
 
-# ========== COMMANDES MODÉRATION ==========
 
-@bot.command(name="warn")
-@commands.has_permissions(administrator=True)
-async def warn(ctx, member: discord.Member, *, reason="Aucune raison"):
-    """Ajouter un warn (IG ou Discord)"""
-    
-    warns = load_data("data/warns.json")
-    user_id = str(member.id)
-    
-    if user_id not in warns:
-        warns[user_id] = []
-    
-    warn_data = {
-        "reason": reason,
-        "moderator": ctx.author.name,
-        "date": datetime.now().isoformat(),
-        "type": "Discord"
-    }
-    
-    warns[user_id].append(warn_data)
-    save_data("data/warns.json", warns)
-    
-    warn_count = len(warns[user_id])
-    
-    # Embed logs
-    embed = discord.Embed(
-        title="⚠️ Warn Ajouté",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}\nRaison: {reason}\nNombre de warns: {warn_count}",
-        color=discord.Color.orange(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await ctx.send(f"✅ Warn ajouté à {member.mention} (Total: {warn_count})")
-
-@bot.tree.command(name="warn", description="Ajouter un warn à un utilisateur")
-@app_commands.describe(member="L'utilisateur à warn", reason="La raison du warn")
-@app_commands.default_permissions(administrator=True)
-async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Aucune raison"):
-    """Slash command: /warn"""
-    
-    warns = load_data("data/warns.json")
-    user_id = str(member.id)
-    
-    if user_id not in warns:
-        warns[user_id] = []
-    
-    warn_data = {
-        "reason": reason,
-        "moderator": interaction.user.name,
-        "date": datetime.now().isoformat(),
-        "type": "Discord"
-    }
-    
-    warns[user_id].append(warn_data)
-    save_data("data/warns.json", warns)
-    
-    warn_count = len(warns[user_id])
-    
-    embed = discord.Embed(
-        title="⚠️ Warn Ajouté",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}\nRaison: {reason}\nNombre de warns: {warn_count}",
-        color=discord.Color.orange(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await interaction.response.send_message(f"✅ Warn ajouté à {member.mention} (Total: {warn_count})")
-
-@bot.command(name="warns")
-async def warns(ctx, member: discord.Member = None):
-    """Voir les warns d'un utilisateur"""
-    
-    target = member or ctx.author
-    warns = load_data("data/warns.json")
-    user_warns = warns.get(str(target.id), [])
-    
-    embed = discord.Embed(
-        title=f"⚠️ Warns de {target.name}",
-        description=f"Total: {len(user_warns)} warn(s)",
-        color=discord.Color.orange()
-    )
-    
-    if user_warns:
-        for i, warn in enumerate(user_warns, 1):
-            embed.add_field(
-                name=f"Warn #{i}",
-                value=f"Raison: {warn['reason']}\nModérateur: {warn['moderator']}\nDate: {warn['date']}\nType: {warn['type']}",
-                inline=False
-            )
-    
-    await ctx.send(embed=embed)
-
-@bot.tree.command(name="warns", description="Voir les warns d'un utilisateur")
-@app_commands.describe(member="L'utilisateur dont voir les warns (optionnel)")
-async def slash_warns(interaction: discord.Interaction, member: discord.Member = None):
-    """Slash command: /warns"""
-    
-    target = member or interaction.user
-    warns = load_data("data/warns.json")
-    user_warns = warns.get(str(target.id), [])
-    
-    embed = discord.Embed(
-        title=f"⚠️ Warns de {target.name}",
-        description=f"Total: {len(user_warns)} warn(s)",
-        color=discord.Color.orange()
-    )
-    
-    if user_warns:
-        for i, warn in enumerate(user_warns, 1):
-            embed.add_field(
-                name=f"Warn #{i}",
-                value=f"Raison: {warn['reason']}\nModérateur: {warn['moderator']}\nDate: {warn['date']}\nType: {warn['type']}",
-                inline=False
-            )
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.command(name="kick")
-@commands.has_permissions(administrator=True)
-async def kick(ctx, member: discord.Member, *, reason="Aucune raison"):
-    """Kick un utilisateur"""
-    
-    embed = discord.Embed(
-        title="👢 Kick",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}\nRaison: {reason}",
-        color=discord.Color.red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await member.kick(reason=reason)
-    await ctx.send(f"✅ {member.mention} a été kick (Raison: {reason})")
-
-@bot.tree.command(name="kick", description="Kick un utilisateur du serveur")
-@app_commands.describe(member="L'utilisateur à kick", reason="La raison du kick")
-@app_commands.default_permissions(administrator=True)
-async def slash_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Aucune raison"):
-    """Slash command: /kick"""
-    
-    embed = discord.Embed(
-        title="👢 Kick",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}\nRaison: {reason}",
-        color=discord.Color.red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"✅ {member.mention} a été kick (Raison: {reason})")
-
-@bot.command(name="ban")
-@commands.has_permissions(administrator=True)
-async def ban(ctx, member: discord.Member, *, reason="Aucune raison"):
-    """Ban un utilisateur"""
-    
-    embed = discord.Embed(
-        title="🔨 Ban",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}\nRaison: {reason}",
-        color=discord.Color.dark_red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await member.ban(reason=reason)
-    await ctx.send(f"✅ {member.mention} a été banni (Raison: {reason})")
-
-@bot.tree.command(name="ban", description="Bannir un utilisateur du serveur")
-@app_commands.describe(member="L'utilisateur à bannir", reason="La raison du ban")
-@app_commands.default_permissions(administrator=True)
-async def slash_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Aucune raison"):
-    """Slash command: /ban"""
-    
-    embed = discord.Embed(
-        title="🔨 Ban",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}\nRaison: {reason}",
-        color=discord.Color.dark_red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"✅ {member.mention} a été banni (Raison: {reason})")
-
-@bot.command(name="mute")
-@commands.has_permissions(administrator=True)
-async def mute(ctx, member: discord.Member, time: str, *, reason="Aucune raison"):
-    """Mute temporaire: ?mute @user 1h Raison"""
-    
-    # Parse le temps (5m, 1h, 1d)
-    time_multipliers = {
-        's': 1,
-        'm': 60,
-        'h': 3600,
-        'd': 86400
-    }
-    
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """Envoie un message de départ dans le salon dédié."""
     try:
-        amount = int(time[:-1])
-        unit = time[-1].lower()
-        seconds = amount * time_multipliers.get(unit, 60)
-    except:
-        await ctx.send("❌ Format de temps invalide (ex: 1h, 5m, 1d)")
-        return
-    
-    mutes = load_data("data/mutes.json")
-    mutes[str(member.id)] = {
-        "unmute_time": (datetime.now() + timedelta(seconds=seconds)).isoformat(),
-        "reason": reason
-    }
-    save_data("data/mutes.json", mutes)
-    
-    # Ajoute le rôle mute
-    mute_role = ctx.guild.get_role(MUTED_ROLE)
-    if mute_role:
-        await member.add_roles(mute_role)
-    
-    embed = discord.Embed(
-        title="🔇 Mute",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}\nDurée: {time}\nRaison: {reason}",
-        color=discord.Color.red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await ctx.send(f"✅ {member.mention} a été mute pour {time}")
-
-@bot.tree.command(name="mute", description="Mute temporaire un utilisateur (ex: 1h, 5m, 1d)")
-@app_commands.describe(member="L'utilisateur à mute", time="Durée (ex: 1h, 5m, 1d)", reason="La raison du mute")
-@app_commands.default_permissions(administrator=True)
-async def slash_mute(interaction: discord.Interaction, member: discord.Member, time: str, reason: str = "Aucune raison"):
-    """Slash command: /mute"""
-    
-    time_multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
-    
-    try:
-        amount = int(time[:-1])
-        unit = time[-1].lower()
-        seconds = amount * time_multipliers.get(unit, 60)
-    except Exception:
-        await interaction.response.send_message("❌ Format de temps invalide (ex: 1h, 5m, 1d)", ephemeral=True)
-        return
-    
-    mutes = load_data("data/mutes.json")
-    mutes[str(member.id)] = {
-        "unmute_time": (datetime.now() + timedelta(seconds=seconds)).isoformat(),
-        "reason": reason
-    }
-    save_data("data/mutes.json", mutes)
-    
-    mute_role = interaction.guild.get_role(MUTED_ROLE)
-    if mute_role:
-        await member.add_roles(mute_role)
-    
-    embed = discord.Embed(
-        title="🔇 Mute",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}\nDurée: {time}\nRaison: {reason}",
-        color=discord.Color.red(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await interaction.response.send_message(f"✅ {member.mention} a été mute pour {time}")
-
-@bot.command(name="unmute")
-@commands.has_permissions(administrator=True)
-async def unmute(ctx, member: discord.Member):
-    """Unmute un utilisateur"""
-    
-    mutes = load_data("data/mutes.json")
-    if str(member.id) in mutes:
-        del mutes[str(member.id)]
-        save_data("data/mutes.json", mutes)
-    
-    mute_role = ctx.guild.get_role(MUTED_ROLE)
-    if mute_role:
-        await member.remove_roles(mute_role)
-    
-    embed = discord.Embed(
-        title="🔊 Unmute",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await ctx.send(f"✅ {member.mention} a été unmute")
-
-@bot.tree.command(name="unmute", description="Unmute un utilisateur")
-@app_commands.describe(member="L'utilisateur à unmute")
-@app_commands.default_permissions(administrator=True)
-async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
-    """Slash command: /unmute"""
-    
-    mutes = load_data("data/mutes.json")
-    if str(member.id) in mutes:
-        del mutes[str(member.id)]
-        save_data("data/mutes.json", mutes)
-    
-    mute_role = interaction.guild.get_role(MUTED_ROLE)
-    if mute_role:
-        await member.remove_roles(mute_role)
-    
-    embed = discord.Embed(
-        title="🔊 Unmute",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now()
-    )
-    
-    logs_channel = bot.get_channel(LOGS_CHANNEL)
-    if logs_channel:
-        await logs_channel.send(embed=embed)
-    
-    await interaction.response.send_message(f"✅ {member.mention} a été unmute")
-
-# ========== COMMANDES WHITELIST ==========
-
-@bot.command(name="whitelist")
-@commands.has_permissions(administrator=True)
-async def whitelist(ctx, member: discord.Member, legal: str, background: str, rules: str, *, note=""):
-    """
-    Whitelist: ?whitelist @user légal/illégal ok/non-ok ok/non-ok Note
-    """
-    
-    if legal.lower() not in ["legal", "illegale"]:
-        await ctx.send("❌ Légal doit être: legal ou illegale")
-        return
-    
-    if background.lower() not in ["ok", "non-ok"]:
-        await ctx.send("❌ Background doit être: ok ou non-ok")
-        return
-    
-    if rules.lower() not in ["ok", "non-ok"]:
-        await ctx.send("❌ Règlement doit être: ok ou non-ok")
-        return
-    
-    whitelist = load_data("data/whitelist.json")
-    whitelist[str(member.id)] = {
-        "name": member.name,
-        "legal": legal.lower(),
-        "background": background.lower(),
-        "rules": rules.lower(),
-        "note": note,
-        "date": datetime.now().isoformat(),
-        "moderator": ctx.author.name
-    }
-    save_data("data/whitelist.json", whitelist)
-    
-    # Ajoute le rôle
-    wl_role = ctx.guild.get_role(CITOYEN_WL_ROLE)
-    if wl_role:
-        await member.add_roles(wl_role)
-    
-    # Log
-    embed = discord.Embed(
-        title="✅ Whitelist Acceptée",
-        description=f"Utilisateur: {member.mention}\nModérateur: {ctx.author.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now()
-    )
-    embed.add_field(name="Légal", value=legal, inline=True)
-    embed.add_field(name="Background OK", value=background, inline=True)
-    embed.add_field(name="Règlement OK", value=rules, inline=True)
-    embed.add_field(name="Note", value=note or "Aucune", inline=False)
-    
-    logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
-    if logs_wl:
-        await logs_wl.send(embed=embed)
-    
-    await ctx.send(f"✅ {member.mention} a été whitelisté")
-
-@bot.tree.command(name="whitelist", description="Whitelister un utilisateur")
-@app_commands.describe(
-    member="L'utilisateur à whitelister",
-    legal="legal ou illegale",
-    background="ok ou non-ok",
-    rules="ok ou non-ok",
-    note="Note optionnelle"
-)
-@app_commands.default_permissions(administrator=True)
-async def slash_whitelist(interaction: discord.Interaction, member: discord.Member, legal: str, background: str, rules: str, note: str = ""):
-    """Slash command: /whitelist"""
-    
-    if legal.lower() not in ["legal", "illegale"]:
-        await interaction.response.send_message("❌ Légal doit être: legal ou illegale", ephemeral=True)
-        return
-    
-    if background.lower() not in ["ok", "non-ok"]:
-        await interaction.response.send_message("❌ Background doit être: ok ou non-ok", ephemeral=True)
-        return
-    
-    if rules.lower() not in ["ok", "non-ok"]:
-        await interaction.response.send_message("❌ Règlement doit être: ok ou non-ok", ephemeral=True)
-        return
-    
-    whitelist = load_data("data/whitelist.json")
-    whitelist[str(member.id)] = {
-        "name": member.name,
-        "legal": legal.lower(),
-        "background": background.lower(),
-        "rules": rules.lower(),
-        "note": note,
-        "date": datetime.now().isoformat(),
-        "moderator": interaction.user.name
-    }
-    save_data("data/whitelist.json", whitelist)
-    
-    wl_role = interaction.guild.get_role(CITOYEN_WL_ROLE)
-    if wl_role:
-        await member.add_roles(wl_role)
-    
-    embed = discord.Embed(
-        title="✅ Whitelist Acceptée",
-        description=f"Utilisateur: {member.mention}\nModérateur: {interaction.user.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now()
-    )
-    embed.add_field(name="Légal", value=legal, inline=True)
-    embed.add_field(name="Background OK", value=background, inline=True)
-    embed.add_field(name="Règlement OK", value=rules, inline=True)
-    embed.add_field(name="Note", value=note or "Aucune", inline=False)
-    
-    logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
-    if logs_wl:
-        await logs_wl.send(embed=embed)
-    
-    await interaction.response.send_message(f"✅ {member.mention} a été whitelisté")
-
-@bot.command(name="check-wl")
-async def check_wl(ctx, member: discord.Member = None):
-    """Vérifier le statut whitelist"""
-    
-    target = member or ctx.author
-    whitelist = load_data("data/whitelist.json")
-    
-    if str(target.id) in whitelist:
-        wl_data = whitelist[str(target.id)]
-        embed = discord.Embed(
-            title=f"✅ {target.name} - Whitelist",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Légal", value=wl_data['legal'], inline=True)
-        embed.add_field(name="Background OK", value=wl_data['background'], inline=True)
-        embed.add_field(name="Règlement OK", value=wl_data['rules'], inline=True)
-        embed.add_field(name="Note", value=wl_data['note'] or "Aucune", inline=False)
-        embed.add_field(name="Date", value=wl_data['date'], inline=False)
-        embed.add_field(name="Modérateur", value=wl_data['moderator'], inline=False)
+        welcome_channel = bot.get_channel(WELCOME_CHANNEL)
+        if not welcome_channel:
+            return
         
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send(f"❌ {target.mention} n'est pas whitelisté")
-
-@bot.tree.command(name="check-wl", description="Vérifier le statut whitelist d'un utilisateur")
-@app_commands.describe(member="L'utilisateur à vérifier (optionnel)")
-async def slash_check_wl(interaction: discord.Interaction, member: discord.Member = None):
-    """Slash command: /check-wl"""
-    
-    target = member or interaction.user
-    whitelist = load_data("data/whitelist.json")
-    
-    if str(target.id) in whitelist:
-        wl_data = whitelist[str(target.id)]
-        embed = discord.Embed(
-            title=f"✅ {target.name} - Whitelist",
-            color=discord.Color.green()
+        leave_embed = discord.Embed(
+            title="👋 Au revoir !",
+            description=(
+                f"**{member.name}** vient de quitter le serveur.\n\n"
+                f"😢 Nous sommes maintenant **{member.guild.member_count}** membres."
+            ),
+            color=discord.Color.red(),
+            timestamp=datetime.now()
         )
-        embed.add_field(name="Légal", value=wl_data['legal'], inline=True)
-        embed.add_field(name="Background OK", value=wl_data['background'], inline=True)
-        embed.add_field(name="Règlement OK", value=wl_data['rules'], inline=True)
-        embed.add_field(name="Note", value=wl_data['note'] or "Aucune", inline=False)
-        embed.add_field(name="Date", value=wl_data['date'], inline=False)
-        embed.add_field(name="Modérateur", value=wl_data['moderator'], inline=False)
+        leave_embed.set_thumbnail(url=member.display_avatar.url)
+        leave_embed.set_footer(text="Revital RP • À bientôt !")
         
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.response.send_message(f"❌ {target.mention} n'est pas whitelisté")
+        # Pas de mention pour les départs
+        await welcome_channel.send(embed=leave_embed)
+        
+    except Exception as e:
+        print(f"[on_member_remove] Erreur : {e}")
 
-# ========== COMMANDES TICKETS ==========
+# ======================================================
+#  COMMANDES — VÉRIFICATION
+# ======================================================
 
-@bot.command(name="setup-tickets")
-@commands.has_permissions(administrator=True)
-async def setup_tickets(ctx):
-    """Setup le système de tickets"""
-    
-    embed = discord.Embed(
-        title="📩 Système de Tickets",
-        description="Clique sur le bouton ci-dessous pour créer un ticket",
-        color=discord.Color.blurple()
-    )
-    
-    view = TicketView(bot)
-    await ctx.send(embed=embed, view=view)
-    await ctx.send("✅ Système de tickets configuré!")
-
-@bot.tree.command(name="setup-tickets", description="Configurer le système de tickets dans ce salon")
-@app_commands.default_permissions(administrator=True)
-async def slash_setup_tickets(interaction: discord.Interaction):
-    """Slash command: /setup-tickets"""
-    
-    embed = discord.Embed(
-        title="📩 Système de Tickets",
-        description="Clique sur le bouton ci-dessous pour créer un ticket",
-        color=discord.Color.blurple()
-    )
-    
-    view = TicketView(bot)
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Système de tickets configuré!", ephemeral=True)
-
-# ========== COMMANDES VÉRIFICATION ==========
-
-@bot.command(name="verify")
-async def verify(ctx, code: str):
-    """Vérifier avec le captcha: ?verify CODE"""
-    
+@tree.command(name="verify", description="Vérifier ton compte avec le code captcha")
+@app_commands.describe(code="Le code reçu dans #verification")
+async def verify(interaction: discord.Interaction, code: str):
     captchas = load_data("data/captchas.json")
-    user_id = str(ctx.author.id)
-    
-    if user_id not in captchas:
-        await ctx.send("❌ Tu n'as pas de captcha actif. Utilise ?getcaptcha", delete_after=5)
-        return
-    
-    if captchas[user_id]["code"] == code:
-        del captchas[user_id]
-        save_data("data/captchas.json", captchas)
-        
-        # Ajoute le rôle vérifié
-        guild = ctx.guild
-        verified_role = guild.get_role(VERIFIED_ROLE)
-        if verified_role:
-            await ctx.author.add_roles(verified_role)
-        
-        embed = discord.Embed(
-            title="✅ Vérification Réussie!",
-            description="Tu peux maintenant accéder au serveur",
-            color=discord.Color.green()
-        )
-        await ctx.send(embed=embed, delete_after=10)
-    else:
-        captchas[user_id]["attempts"] = captchas[user_id].get("attempts", 0) + 1
-        save_data("data/captchas.json", captchas)
-        
-        await ctx.send("❌ Code incorrect! Essaye à nouveau.", delete_after=5)
+    uid = str(interaction.user.id)
 
-@bot.tree.command(name="verify", description="Vérifier ton compte avec le code captcha")
-@app_commands.describe(code="Le code captcha reçu")
-async def slash_verify(interaction: discord.Interaction, code: str):
-    """Slash command: /verify"""
-    
-    captchas = load_data("data/captchas.json")
-    user_id = str(interaction.user.id)
-    
-    if user_id not in captchas:
-        await interaction.response.send_message("❌ Tu n'as pas de captcha actif. Utilise /getcaptcha", ephemeral=True)
+    if uid not in captchas:
+        await interaction.response.send_message("❌ Aucun captcha actif. Quitte et rejoins le serveur à nouveau.", ephemeral=True)
         return
-    
-    if captchas[user_id]["code"] == code:
-        del captchas[user_id]
+
+    if captchas[uid]["code"] == code.upper().strip():
+        # Code correct
+        del captchas[uid]
         save_data("data/captchas.json", captchas)
         
+        # Retirer le rôle non-vérifié
+        unverified_role = interaction.guild.get_role(UNVERIFIED_ROLE)
+        if unverified_role and unverified_role in interaction.user.roles:
+            await interaction.user.remove_roles(unverified_role)
+        
+        # Ajouter le rôle vérifié
         verified_role = interaction.guild.get_role(VERIFIED_ROLE)
         if verified_role:
             await interaction.user.add_roles(verified_role)
-        
+
+        # Supprimer les messages du captcha dans #verification
+        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
+        if verification_channel:
+            try:
+                async for msg in verification_channel.history(limit=50):
+                    if (msg.author == bot.user and interaction.user.mentioned_in(msg)) or                        (msg.author == interaction.user):
+                        await msg.delete()
+            except Exception:
+                pass
+
         embed = discord.Embed(
-            title="✅ Vérification Réussie!",
-            description="Tu peux maintenant accéder au serveur",
+            title="✅ Vérification réussie !",
+            description="Bienvenue sur **Revital RP** !\n\nTu as maintenant accès à l'ensemble du serveur. 🎉",
             color=discord.Color.green()
         )
+        embed.set_footer(text="Bon jeu sur Revital RP !")
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        captchas[user_id]["attempts"] = captchas[user_id].get("attempts", 0) + 1
+        captchas[uid]["attempts"] = captchas[uid].get("attempts", 0) + 1
         save_data("data/captchas.json", captchas)
-        
-        await interaction.response.send_message("❌ Code incorrect! Essaye à nouveau.", ephemeral=True)
+        attempts = captchas[uid]["attempts"]
+        await interaction.response.send_message(f"❌ Code incorrect. Tentative {attempts}/5.", ephemeral=True)
 
-@bot.command(name="getcaptcha")
-async def getcaptcha(ctx):
-    """Obtenir un nouveau captcha"""
-    
-    captcha_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    
-    captchas = load_data("data/captchas.json")
-    captchas[str(ctx.author.id)] = {
-        "code": captcha_code,
-        "created": datetime.now().isoformat(),
-        "attempts": 0
+# ======================================================
+#  COMMANDES — MODÉRATION
+# ======================================================
+
+@tree.command(name="warn", description="Ajouter un warn à un membre")
+@app_commands.describe(member="Le membre à avertir", raison="Raison de l'avertissement", type_warn="Discord ou IG")
+@app_commands.choices(type_warn=[
+    app_commands.Choice(name="Discord", value="Discord"),
+    app_commands.Choice(name="In-Game", value="In-Game"),
+])
+async def warn(interaction: discord.Interaction, member: discord.Member, raison: str, type_warn: app_commands.Choice[str] = None):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
+        return
+
+    warns_data = load_data("data/warns.json")
+    uid = str(member.id)
+    if uid not in warns_data:
+        warns_data[uid] = []
+
+    entry = {
+        "reason":    raison,
+        "moderator": interaction.user.name,
+        "mod_id":    interaction.user.id,
+        "date":      datetime.now().isoformat(),
+        "type":      type_warn.value if type_warn else "Discord",
     }
-    save_data("data/captchas.json", captchas)
-    
+    warns_data[uid].append(entry)
+    save_data("data/warns.json", warns_data)
+    count = len(warns_data[uid])
+
     embed = discord.Embed(
-        title="🔐 Nouveau Captcha",
-        description=f"Ton code: **{captcha_code}**\n\nEntre: `?verify {captcha_code}`",
-        color=discord.Color.blue()
+        title="⚠️ Warn Ajouté",
+        color=discord.Color.orange(),
+        timestamp=datetime.now()
     )
-    
-    await ctx.send(embed=embed, delete_after=30)
+    embed.add_field(name="Utilisateur",  value=member.mention, inline=True)
+    embed.add_field(name="Modérateur",   value=interaction.user.mention, inline=True)
+    embed.add_field(name="Total warns",  value=str(count), inline=True)
+    embed.add_field(name="Type",         value=entry["type"], inline=True)
+    embed.add_field(name="Raison",       value=raison, inline=False)
 
-@bot.tree.command(name="getcaptcha", description="Obtenir un nouveau code captcha de vérification")
-async def slash_getcaptcha(interaction: discord.Interaction):
-    """Slash command: /getcaptcha"""
-    
-    captcha_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    
-    captchas = load_data("data/captchas.json")
-    captchas[str(interaction.user.id)] = {
-        "code": captcha_code,
-        "created": datetime.now().isoformat(),
-        "attempts": 0
-    }
-    save_data("data/captchas.json", captchas)
-    
+    log_ch = bot.get_channel(LOGS_CHANNEL)
+    if log_ch:
+        await log_ch.send(embed=embed)
+
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="warns", description="Voir les warns d'un membre")
+@app_commands.describe(member="Le membre (toi par défaut)")
+async def warns_cmd(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    warns_data = load_data("data/warns.json")
+    user_warns = warns_data.get(str(target.id), [])
+
     embed = discord.Embed(
-        title="🔐 Nouveau Captcha",
-        description=f"Ton code: **{captcha_code}**\n\nEntre: `/verify {captcha_code}`",
-        color=discord.Color.blue()
+        title=f"⚠️ Warns — {target.display_name}",
+        description=f"**{len(user_warns)} avertissement(s)** au total",
+        color=discord.Color.orange()
     )
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    for i, w in enumerate(user_warns[-10:], 1):  # 10 derniers max
+        embed.add_field(
+            name=f"Warn #{i} — {w.get('type', 'Discord')}",
+            value=f"📋 {w['reason']}\n👮 {w['moderator']} • 📅 {w['date'][:10]}",
+            inline=False
+        )
+    if not user_warns:
+        embed.description = "✅ Aucun avertissement."
+    await interaction.response.send_message(embed=embed)
 
-# ========== BOUCLE MUTES ==========
 
-@tasks.loop(seconds=10)
-async def check_mutes():
-    """Vérifie et retire les mutes expirés"""
-    
+@tree.command(name="clearwarn", description="Supprimer un warn spécifique d'un membre")
+@app_commands.describe(member="Le membre", numero="Numéro du warn (voir /warns)")
+async def clearwarn(interaction: discord.Interaction, member: discord.Member, numero: int):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    warns_data = load_data("data/warns.json")
+    uid = str(member.id)
+    lst = warns_data.get(uid, [])
+    if numero < 1 or numero > len(lst):
+        await interaction.response.send_message(f"❌ Warn #{numero} introuvable (total: {len(lst)}).", ephemeral=True)
+        return
+    removed = lst.pop(numero - 1)
+    warns_data[uid] = lst
+    save_data("data/warns.json", warns_data)
+    await interaction.response.send_message(f"✅ Warn #{numero} de {member.mention} supprimé (`{removed['reason']}`).")
+
+
+@tree.command(name="clearallwarns", description="Supprimer TOUS les warns d'un membre")
+@app_commands.describe(member="Le membre")
+async def clearallwarns(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    warns_data = load_data("data/warns.json")
+    warns_data[str(member.id)] = []
+    save_data("data/warns.json", warns_data)
+    await interaction.response.send_message(f"✅ Tous les warns de {member.mention} ont été supprimés.")
+
+
+@tree.command(name="history", description="Voir l'historique complet des sanctions d'un membre")
+@app_commands.describe(member="Le membre")
+async def history(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+        return
+
+    warns_data = load_data("data/warns.json")
+    wl_data    = load_data("data/whitelist.json")
+    mutes_data = load_data("data/mutes.json")
+
+    embed = discord.Embed(
+        title=f"📁 Historique — {member.display_name}",
+        description=f"ID : `{member.id}`",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    # Warns
+    user_warns = warns_data.get(str(member.id), [])
+    warn_text = "\n".join(
+        [f"• [{w.get('type','?')}] {w['reason']} — {w['date'][:10]} (par {w['moderator']})" for w in user_warns[-5:]]
+    ) or "Aucun warn"
+    embed.add_field(name=f"⚠️ Warns ({len(user_warns)})", value=warn_text, inline=False)
+
+    # Whitelist
+    wl = wl_data.get(str(member.id))
+    if wl:
+        current = wl.get("current", {})
+        nb = len(wl.get("entries", []))
+        embed.add_field(
+            name=f"✅ Whitelist ({nb} entrée(s))",
+            value=(
+                f"Décision actuelle : **{current.get('decision','?').upper()}**\n"
+                f"Type : {current.get('type_wl','?')} | Nom RP : {current.get('nom_rp','?')}\n"
+                f"Date : {current.get('date','?')[:10]}"
+            ),
+            inline=False
+        )
+    else:
+        embed.add_field(name="✅ Whitelist", value="Non whitelisté", inline=False)
+
+    # Mute actif
+    mute = mutes_data.get(str(member.id))
+    if mute:
+        embed.add_field(
+            name="🔇 Mute actif",
+            value=f"Fin : {mute['unmute_time'][:16].replace('T',' ')}\nRaison : {mute['reason']}",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="mute", description="Mute temporaire un membre")
+@app_commands.describe(member="Le membre", duree="Durée (ex: 30m, 1h, 7d)", raison="Raison")
+async def mute(interaction: discord.Interaction, member: discord.Member, duree: str, raison: str = "Aucune raison"):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
+        return
+    seconds = parse_duration(duree)
+    if seconds is None:
+        await interaction.response.send_message("❌ Format invalide. Ex : `30m`, `1h`, `7d`", ephemeral=True)
+        return
+
     mutes = load_data("data/mutes.json")
-    guild = bot.get_guild(GUILD_ID)
-    now = datetime.now()
-    
-    to_remove = []
-    
-    for user_id, mute_info in mutes.items():
-        unmute_time = datetime.fromisoformat(mute_info["unmute_time"])
-        
-        if now >= unmute_time:
-            try:
-                member = await guild.fetch_member(int(user_id))
-                mute_role = guild.get_role(MUTED_ROLE)
-                
-                if mute_role and mute_role in member.roles:
-                    await member.remove_roles(mute_role)
-                
-                to_remove.append(user_id)
-            except:
-                pass
-    
-    for user_id in to_remove:
-        del mutes[user_id]
-    
+    mutes[str(member.id)] = {
+        "unmute_time": (datetime.now() + timedelta(seconds=seconds)).isoformat(),
+        "reason":      raison,
+        "moderator":   interaction.user.name,
+    }
     save_data("data/mutes.json", mutes)
 
-# ========== DÉMARRAGE ==========
+    mute_role = interaction.guild.get_role(MUTED_ROLE)
+    if mute_role:
+        await member.add_roles(mute_role)
+
+    embed = discord.Embed(title="🔇 Mute", color=discord.Color.red(), timestamp=datetime.now())
+    embed.add_field(name="Membre",      value=member.mention)
+    embed.add_field(name="Durée",       value=fmt_duration(seconds))
+    embed.add_field(name="Modérateur",  value=interaction.user.mention)
+    embed.add_field(name="Raison",      value=raison, inline=False)
+
+    log_ch = bot.get_channel(LOGS_CHANNEL)
+    if log_ch:
+        await log_ch.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="unmute", description="Unmute un membre")
+@app_commands.describe(member="Le membre")
+async def unmute(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Permission refusée.", ephemeral=True)
+        return
+    mutes = load_data("data/mutes.json")
+    if str(member.id) in mutes:
+        del mutes[str(member.id)]
+        save_data("data/mutes.json", mutes)
+    mute_role = interaction.guild.get_role(MUTED_ROLE)
+    if mute_role:
+        await member.remove_roles(mute_role)
+    await interaction.response.send_message(f"✅ {member.mention} a été unmute.")
+
+
+@tree.command(name="kick", description="Expulser un membre")
+@app_commands.describe(member="Le membre", raison="Raison")
+async def kick(interaction: discord.Interaction, member: discord.Member, raison: str = "Aucune raison"):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    embed = discord.Embed(title="👢 Kick", color=discord.Color.red(), timestamp=datetime.now())
+    embed.add_field(name="Membre", value=member.mention)
+    embed.add_field(name="Modérateur", value=interaction.user.mention)
+    embed.add_field(name="Raison", value=raison, inline=False)
+    log_ch = bot.get_channel(LOGS_CHANNEL)
+    if log_ch:
+        await log_ch.send(embed=embed)
+    await member.kick(reason=raison)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="ban", description="Bannir un membre")
+@app_commands.describe(member="Le membre", raison="Raison", duree="Durée du ban (optionnel : 7d, 30d...)")
+async def ban(interaction: discord.Interaction, member: discord.Member, raison: str = "Aucune raison", duree: str = None):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+    embed = discord.Embed(title="🔨 Ban", color=discord.Color.dark_red(), timestamp=datetime.now())
+    embed.add_field(name="Membre",     value=member.mention)
+    embed.add_field(name="Modérateur", value=interaction.user.mention)
+    embed.add_field(name="Durée",      value=duree or "Permanent")
+    embed.add_field(name="Raison",     value=raison, inline=False)
+    log_ch = bot.get_channel(LOGS_CHANNEL)
+    if log_ch:
+        await log_ch.send(embed=embed)
+    await member.ban(reason=raison)
+    await interaction.response.send_message(embed=embed)
+
+
+# ======================================================
+#  COMMANDES — WHITELIST
+# ======================================================
+
+@tree.command(name="whitelist", description="Ouvrir le formulaire de whitelist pour un joueur")
+@app_commands.describe(member="Le joueur à whitelister")
+async def whitelist_cmd(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+        return
+    modal = WhitelistStep1Modal(member)
+    await interaction.response.send_modal(modal)
+
+
+@tree.command(name="check-wl", description="Vérifier le statut whitelist d'un joueur")
+@app_commands.describe(member="Le joueur (toi par défaut)")
+async def check_wl(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    wl_data = load_data("data/whitelist.json")
+    entry   = wl_data.get(str(target.id))
+
+    if not entry or not entry.get("current"):
+        await interaction.response.send_message(f"❌ {target.mention} n'est pas whitelisté.", ephemeral=True)
+        return
+
+    c = entry["current"]
+    nb_entries = len(entry.get("entries", []))
+    icons = {"accepte": "✅", "refuse": "❌", "attente": "⏳"}
+    colors = {"accepte": discord.Color.green(), "refuse": discord.Color.red(), "attente": discord.Color.gold()}
+    decision = c.get("decision", "?")
+
+    embed = discord.Embed(
+        title=f"{icons.get(decision,'?')} Whitelist — {target.display_name}",
+        color=colors.get(decision, discord.Color.grey()),
+        timestamp=datetime.now()
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="🎭 Nom RP",        value=c.get("nom_rp","?"),   inline=True)
+    embed.add_field(name="🎂 Âge RP",        value=c.get("age_rp","?"),   inline=True)
+    embed.add_field(name="⚖️ Type",          value=WL_ROLES.get(c.get("type_wl",""),"?"), inline=True)
+    embed.add_field(name="📖 Background",    value="✅" if c.get("background_ok")=="ok" else "❌", inline=True)
+    embed.add_field(name="📜 Règlement",     value="✅" if c.get("reglement_ok")=="ok" else "❌",  inline=True)
+    embed.add_field(name="🗓️ Date",         value=c.get("date","?")[:10], inline=True)
+    embed.add_field(name="👮 Modérateur",    value=c.get("moderator","?"), inline=True)
+    if c.get("notes"):
+        embed.add_field(name="🗒️ Notes",    value=c["notes"], inline=False)
+    embed.set_footer(text=f"{nb_entries} entrée(s) au total dans l'historique")
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="wl-history", description="Voir tout l'historique de whitelist d'un joueur")
+@app_commands.describe(member="Le joueur")
+async def wl_history(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+        return
+    wl_data = load_data("data/whitelist.json")
+    entry   = wl_data.get(str(member.id))
+
+    if not entry or not entry.get("entries"):
+        await interaction.response.send_message(f"❌ Aucun historique pour {member.mention}.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"📚 Historique WL — {member.display_name}",
+        description=f"{len(entry['entries'])} entrée(s) au total",
+        color=discord.Color.blurple()
+    )
+    for i, e in enumerate(entry["entries"][-8:], 1):
+        icons = {"accepte": "✅", "refuse": "❌", "attente": "⏳"}
+        embed.add_field(
+            name=f"Entrée #{i} — {icons.get(e.get('decision','?'),'?')} {e.get('decision','?').upper()}",
+            value=(
+                f"Nom RP : {e.get('nom_rp','?')} | Type : {e.get('type_wl','?')}\n"
+                f"BG : {'✅' if e.get('background_ok')=='ok' else '❌'} | Règl : {'✅' if e.get('reglement_ok')=='ok' else '❌'}\n"
+                f"👮 {e.get('moderator','?')} • 📅 {e.get('date','?')[:10]}"
+            ),
+            inline=False
+        )
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="wl-revoke", description="Révoquer la whitelist d'un joueur")
+@app_commands.describe(member="Le joueur", raison="Raison de la révocation")
+async def wl_revoke(interaction: discord.Interaction, member: discord.Member, raison: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+
+    wl_data = load_data("data/whitelist.json")
+    uid = str(member.id)
+    if uid not in wl_data:
+        await interaction.response.send_message(f"❌ {member.mention} n'est pas whitelisté.", ephemeral=True)
+        return
+
+    # Marque comme révoqué
+    revoke_entry = {
+        "nom_rp":    wl_data[uid].get("current", {}).get("nom_rp", "?"),
+        "decision":  "revoque",
+        "raison":    raison,
+        "moderator": interaction.user.name,
+        "date":      datetime.now().isoformat(),
+    }
+    wl_data[uid]["entries"].append(revoke_entry)
+    wl_data[uid]["current"] = revoke_entry
+    save_data("data/whitelist.json", wl_data)
+
+    # Retire le rôle
+    wl_role = interaction.guild.get_role(CITOYEN_WL_ROLE)
+    if wl_role and wl_role in member.roles:
+        await member.remove_roles(wl_role)
+
+    # Log
+    embed = discord.Embed(
+        title="🚫 Whitelist Révoquée",
+        description=f"{member.mention} (`{member.id}`)\nRaison : {raison}\nPar : {interaction.user.mention}",
+        color=discord.Color.dark_red(),
+        timestamp=datetime.now()
+    )
+    logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
+    if logs_wl:
+        await logs_wl.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
+
+
+# ======================================================
+#  COMMANDES — TICKETS
+# ======================================================
+
+@tree.command(name="setup-tickets", description="Configurer le panneau de création de tickets")
+async def setup_tickets(interaction: discord.Interaction):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🎫 Système de Tickets — Revital RP",
+        description=(
+            "Besoin d'aide ou d'un suivi particulier ?\n\n"
+            "**Sélectionne une catégorie** dans le menu ci-dessous pour ouvrir un ticket privé.\n"
+            "Un membre du staff te répondra dès que possible.\n\n"
+            "📋 Disponible : Support, Plainte, Boutique, Dev, Dossiers RP, Recours ban..."
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text="Revital RP • Un seul ticket à la fois svp")
+
+    view = TicketOpenView()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Panneau de tickets envoyé !", ephemeral=True)
+
+
+@tree.command(name="ticket-add", description="Ajouter un membre à un ticket (dans le salon du ticket)")
+@app_commands.describe(member="Le membre à ajouter")
+async def ticket_add(interaction: discord.Interaction, member: discord.Member):
+    if not is_staff(interaction):
+        await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
+        return
+    await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+    await interaction.response.send_message(f"✅ {member.mention} ajouté au ticket.")
+
+
+@tree.command(name="ticket-close", description="Fermer le ticket actuel (avec transcript)")
+async def ticket_close(interaction: discord.Interaction):
+    tickets = load_data("data/tickets.json")
+    key = str(interaction.channel.id)
+    if key not in tickets:
+        await interaction.response.send_message("❌ Ce salon n'est pas un ticket.", ephemeral=True)
+        return
+    ticket_data = tickets[key]
+    confirm_view = TicketCloseConfirmView(interaction.channel, ticket_data)
+    await interaction.response.send_message("⚠️ Confirmer la fermeture ?", view=confirm_view, ephemeral=True)
+
+
+# ======================================================
+#  BOUCLE — MUTES EXPIRÉS
+# ======================================================
+
+@tasks.loop(seconds=15)
+async def check_mutes():
+    mutes = load_data("data/mutes.json")
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+    now = datetime.now()
+    to_remove = []
+
+    for uid, info in mutes.items():
+        try:
+            unmute_time = datetime.fromisoformat(info["unmute_time"])
+            if now >= unmute_time:
+                member = await guild.fetch_member(int(uid))
+                mute_role = guild.get_role(MUTED_ROLE)
+                if mute_role and mute_role in member.roles:
+                    await member.remove_roles(mute_role)
+                to_remove.append(uid)
+        except Exception:
+            to_remove.append(uid)
+
+    for uid in to_remove:
+        del mutes[uid]
+    save_data("data/mutes.json", mutes)
+
+
+# ======================================================
+#  DÉMARRAGE
+# ======================================================
 
 if __name__ == "__main__":
     create_data_files()
     
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        print("❌ ERREUR: DISCORD_TOKEN non défini !")
+    if not TOKEN:
+        print("❌ ERREUR: Le token Discord n'est pas configuré!")
+        print("📝 Créez un fichier .env et ajoutez votre token Discord")
+        print("💡 Voir .env.example pour un exemple")
         exit(1)
     
-    bot.run(token)
+    bot.run(TOKEN)
