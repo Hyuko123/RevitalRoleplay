@@ -111,31 +111,22 @@ CATEGORY_LABELS = {
 #  TRANSCRIPT HTML
 # ======================================================
 
-async def generate_transcript(channel: discord.TextChannel) -> str:
-    """Génère un fichier HTML avec l'historique du ticket."""
-    messages = []
-    async for msg in channel.history(limit=500, oldest_first=True):
-        messages.append(msg)
+async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -> str:
+    """Génère un fichier HTML résumant uniquement la prise en charge et la fermeture du ticket."""
+    number = ticket_data.get("number", "?")
+    category = ticket_data.get("category", "")
+    category_label = CATEGORY_LABELS.get(category, category or "?")
+    creator_name = ticket_data.get("creator_name", "?")
+    created_at = ticket_data.get("created_at", "")
+    claimed_by_name = ticket_data.get("claimed_by_name") or "Non assigné"
+    closed_by = ticket_data.get("closed_by") or "?"
+    closed_at = ticket_data.get("closed_at") or datetime.now().isoformat()
 
-    rows = ""
-    for msg in messages:
-        avatar = msg.author.display_avatar.url if msg.author.display_avatar else ""
-        ts = msg.created_at.strftime("%d/%m/%Y %H:%M")
-        content = discord.utils.escape_mentions(msg.content or "")
-        embed_html = ""
-        for emb in msg.embeds:
-            title = emb.title or ""
-            desc = emb.description or ""
-            embed_html += f'<div class="embed"><b>{title}</b><br>{desc}</div>'
-        rows += f"""
-        <div class="message">
-            <img class="avatar" src="{avatar}" alt="">
-            <div class="content">
-                <span class="author">{msg.author.display_name}</span>
-                <span class="timestamp">{ts}</span>
-                <div class="text">{content}{embed_html}</div>
-            </div>
-        </div>"""
+    def fmt_dt(iso_str: str) -> str:
+        try:
+            return datetime.fromisoformat(iso_str).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return iso_str or "?"
 
     html = f"""<!DOCTYPE html>
 <html lang="fr">
@@ -145,18 +136,18 @@ async def generate_transcript(channel: discord.TextChannel) -> str:
 <style>
   body {{ font-family: 'Segoe UI', sans-serif; background: #36393f; color: #dcddde; margin: 0; padding: 20px; }}
   h1 {{ color: #ffffff; border-bottom: 2px solid #5865f2; padding-bottom: 8px; }}
-  .message {{ display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid #40444b; }}
-  .avatar {{ width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; }}
-  .author {{ font-weight: bold; color: #ffffff; margin-right: 8px; }}
-  .timestamp {{ font-size: 0.75em; color: #72767d; }}
-  .text {{ margin-top: 4px; white-space: pre-wrap; }}
-  .embed {{ background: #2f3136; border-left: 4px solid #5865f2; padding: 8px 12px; margin-top: 6px; border-radius: 4px; }}
+  .row {{ display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid #40444b; }}
+  .label {{ font-weight: bold; color: #ffffff; min-width: 180px; }}
+  .value {{ color: #dcddde; }}
 </style>
 </head>
 <body>
-<h1>📋 Transcript — #{channel.name}</h1>
-<p style="color:#72767d">Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
-{rows}
+<h1>📋 Transcript — Ticket #{number:04d} — {category_label}</h1>
+<div class="row"><div class="label">Créé par</div><div class="value">{creator_name}</div></div>
+<div class="row"><div class="label">Date de création</div><div class="value">{fmt_dt(created_at)}</div></div>
+<div class="row"><div class="label">Pris en charge par</div><div class="value">{claimed_by_name}</div></div>
+<div class="row"><div class="label">Fermé par</div><div class="value">{closed_by}</div></div>
+<div class="row"><div class="label">Date de fermeture</div><div class="value">{fmt_dt(closed_at)}</div></div>
 </body>
 </html>"""
 
@@ -287,12 +278,21 @@ class TicketPanelView(discord.ui.View):
         if key not in tickets:
             await interaction.response.send_message("❌ Ticket introuvable.", ephemeral=True)
             return
-        tickets[key]["claimed_by"] = interaction.user.id
-        tickets[key]["claimed_by_name"] = interaction.user.name
+        ticket_data = tickets[key]
+        ticket_data["claimed_by"] = interaction.user.id
+        ticket_data["claimed_by_name"] = interaction.user.name
         save_data("data/tickets.json", tickets)
         await interaction.response.send_message(
             f"✅ **{interaction.user.mention}** a pris en charge ce ticket.", ephemeral=False
         )
+
+        log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
+        if log_ch:
+            number = ticket_data.get("number", "?")
+            category_label = CATEGORY_LABELS.get(ticket_data.get("category", ""), "?")
+            await log_ch.send(
+                f"✅ Ticket #{number:04d} ({category_label}) — {interaction.channel.mention} pris en charge par {interaction.user.mention}"
+            )
 
     @discord.ui.button(label="👤 Ajouter membre", style=discord.ButtonStyle.blurple, custom_id="ticket_add_member")
     async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -309,17 +309,6 @@ class TicketPanelView(discord.ui.View):
             return
         modal = ReassignModal(interaction.channel)
         await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="📋 Transcript", style=discord.ButtonStyle.grey, custom_id="ticket_transcript")
-    async def transcript(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_staff(interaction):
-            await interaction.response.send_message("❌ Réservé au staff.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        path = await generate_transcript(interaction.channel)
-        await interaction.followup.send(
-            "📋 Voici le transcript :", file=discord.File(path), ephemeral=True
-        )
 
     @discord.ui.button(label="🔒 Fermer", style=discord.ButtonStyle.red, custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -348,15 +337,16 @@ class TicketCloseConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
-        path = await generate_transcript(self.channel)
-
         tickets = load_data("data/tickets.json")
         key = str(self.channel.id)
         if key in tickets:
             tickets[key]["status"] = "closed"
             tickets[key]["closed_at"] = datetime.now().isoformat()
             tickets[key]["closed_by"] = interaction.user.name
+            self.ticket_data = tickets[key]
         save_data("data/tickets.json", tickets)
+
+        path = await generate_transcript(self.channel, self.ticket_data)
 
         log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
         if log_ch:
