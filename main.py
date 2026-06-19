@@ -118,7 +118,7 @@ CATEGORY_LABELS = {
 # ======================================================
 
 async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -> str | None:
-    """Génère un fichier HTML avec la prise en charge et fermeture du ticket."""
+    """Génère un fichier HTML avec tous les messages du ticket."""
     try:
         number = ticket_data.get("number", "?")
         category = ticket_data.get("category", "")
@@ -135,26 +135,192 @@ async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -
             except Exception:
                 return iso_str or "?"
 
+        # Récupérer tous les messages du channel
+        messages_html = ""
+        try:
+            messages = []
+            async for msg in channel.history(limit=500, oldest_first=True):
+                messages.append(msg)
+            
+            for msg in messages:
+                # Déterminer la couleur selon le rôle
+                author_color = "#5865f2"  # Bleu par défaut
+                if msg.author.bot:
+                    author_color = "#5865f2"  # Bleu pour les bots
+                elif any(role.name.lower() in ["staff", "admin", "modérateur", "moderator"] for role in getattr(msg.author, 'roles', [])):
+                    author_color = "#f23f43"  # Rouge pour le staff
+                else:
+                    author_color = "#3ba55d"  # Vert pour les joueurs
+                
+                # Formater le contenu du message
+                content = msg.content.replace("<", "<").replace(">", ">").replace("\n", "<br>")
+                if not content:
+                    content = "<i>[Message vide ou embed]</i>"
+                
+                # Ajouter les pièces jointes
+                attachments = ""
+                if msg.attachments:
+                    for att in msg.attachments:
+                        if att.content_type and att.content_type.startswith("image"):
+                            attachments += f'<div class="attachment"><img src="{att.url}" alt="Image" style="max-width: 400px; border-radius: 4px;"></div>'
+                        else:
+                            attachments += f'<div class="attachment">📎 <a href="{att.url}" target="_blank">{att.filename}</a></div>'
+                
+                timestamp = msg.created_at.strftime("%d/%m/%Y %H:%M:%S")
+                
+                messages_html += f"""
+<div class="message">
+    <img src="{msg.author.display_avatar.url}" class="avatar" alt="Avatar">
+    <div class="message-content">
+        <div class="message-header">
+            <span class="author" style="color: {author_color};">{msg.author.display_name}</span>
+            <span class="timestamp">{timestamp}</span>
+        </div>
+        <div class="text">{content}</div>
+        {attachments}
+    </div>
+</div>"""
+        except Exception as msg_err:
+            print(f"[TRANSCRIPT] ⚠️ Erreur récupération messages : {msg_err}")
+            messages_html = "<p><i>Impossible de récupérer les messages du ticket.</i></p>"
+
         html = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<title>Transcript - {channel.name}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transcript - Ticket #{number:04d}</title>
 <style>
-  body {{ font-family: 'Segoe UI', sans-serif; background: #36393f; color: #dcddde; margin: 0; padding: 20px; }}
-  h1 {{ color: #ffffff; border-bottom: 2px solid #5865f2; padding-bottom: 8px; }}
-  .row {{ display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid #40444b; }}
-  .label {{ font-weight: bold; color: #ffffff; min-width: 180px; }}
-  .value {{ color: #dcddde; }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: #36393f;
+    color: #dcddde;
+    padding: 20px;
+    line-height: 1.6;
+  }}
+  .container {{ max-width: 1200px; margin: 0 auto; background: #2f3136; border-radius: 8px; overflow: hidden; }}
+  .header {{
+    background: linear-gradient(90deg, #5865f2 0%, #7289da 100%);
+    padding: 30px;
+    color: white;
+  }}
+  .header h1 {{ font-size: 28px; margin-bottom: 20px; }}
+  .info-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+    margin-top: 20px;
+  }}
+  .info-item {{
+    background: rgba(255,255,255,0.1);
+    padding: 12px;
+    border-radius: 6px;
+  }}
+  .info-label {{
+    font-size: 12px;
+    text-transform: uppercase;
+    opacity: 0.8;
+    margin-bottom: 5px;
+  }}
+  .info-value {{
+    font-size: 16px;
+    font-weight: 600;
+  }}
+  .messages {{
+    padding: 20px;
+    max-height: none;
+  }}
+  .message {{
+    display: flex;
+    padding: 12px 0;
+    border-bottom: 1px solid #40444b;
+    gap: 15px;
+  }}
+  .message:hover {{ background: rgba(255,255,255,0.02); }}
+  .avatar {{
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }}
+  .message-content {{ flex: 1; }}
+  .message-header {{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 5px;
+  }}
+  .author {{
+    font-weight: 600;
+    font-size: 16px;
+  }}
+  .timestamp {{
+    font-size: 12px;
+    color: #72767d;
+  }}
+  .text {{
+    color: #dcddde;
+    word-wrap: break-word;
+    font-size: 15px;
+  }}
+  .attachment {{
+    margin-top: 8px;
+    padding: 8px;
+    background: #2f3136;
+    border-radius: 4px;
+    border-left: 4px solid #5865f2;
+  }}
+  .attachment a {{
+    color: #00aff4;
+    text-decoration: none;
+  }}
+  .attachment a:hover {{ text-decoration: underline; }}
+  .footer {{
+    padding: 20px;
+    text-align: center;
+    color: #72767d;
+    font-size: 12px;
+    border-top: 1px solid #40444b;
+  }}
 </style>
 </head>
 <body>
-<h1>📋 Transcript — Ticket #{number:04d} — {category_label}</h1>
-<div class="row"><div class="label">Créé par</div><div class="value">{creator_name}</div></div>
-<div class="row"><div class="label">Date de création</div><div class="value">{fmt_dt(created_at)}</div></div>
-<div class="row"><div class="label">Pris en charge par</div><div class="value">{claimed_by_name}</div></div>
-<div class="row"><div class="label">Fermé par</div><div class="value">{closed_by}</div></div>
-<div class="row"><div class="label">Date de fermeture</div><div class="value">{fmt_dt(closed_at)}</div></div>
+<div class="container">
+  <div class="header">
+    <h1>📋 Transcript — Ticket #{number:04d}</h1>
+    <div style="font-size: 18px; opacity: 0.9;">{category_label}</div>
+    <div class="info-grid">
+      <div class="info-item">
+        <div class="info-label">Créé par</div>
+        <div class="info-value">{creator_name}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Date de création</div>
+        <div class="info-value">{fmt_dt(created_at)}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Pris en charge par</div>
+        <div class="info-value">{claimed_by_name}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Fermé par</div>
+        <div class="info-value">{closed_by}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">Date de fermeture</div>
+        <div class="info-value">{fmt_dt(closed_at)}</div>
+      </div>
+    </div>
+  </div>
+  <div class="messages">
+    <h2 style="color: #ffffff; margin-bottom: 20px; font-size: 20px;">💬 Conversation</h2>
+    {messages_html}
+  </div>
+  <div class="footer">
+    Transcript généré le {datetime.now().strftime("%d/%m/%Y à %H:%M:%S")} • Revital RP
+  </div>
+</div>
 </body>
 </html>"""
 
@@ -168,7 +334,7 @@ async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         
-        print(f"[TRANSCRIPT] ✅ Créé : {path}")
+        print(f"[TRANSCRIPT] ✅ Créé : {path} (avec {len(messages)} messages)")
         return path
         
     except Exception as e:
