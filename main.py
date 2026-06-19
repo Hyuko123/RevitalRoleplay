@@ -434,7 +434,7 @@ class TicketCategorySelect(discord.ui.Select):
         # 🔔 PING DU STAFF
         staff_role = guild.get_role(STAFF_ROLE)
         if staff_role:
-            await channel.send(f"🔔 {staff_role.mention} — Nouveau ticket à traiter !")
+            await channel.send(f"Bonjour, un {staff_role.mention} va s'occuper de vous !")
             print(f"[TICKET] ✅ Staff ping envoyé")
 
         log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
