@@ -929,33 +929,28 @@ async def verify(interaction: discord.Interaction, code: str):
     uid = str(interaction.user.id)
 
     if uid not in captchas:
-        await interaction.response.send_message("❌ Aucun captcha actif. Quitte et rejoins le serveur à nouveau.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Aucun captcha actif. Quitte et rejoins le serveur à nouveau.",
+            ephemeral=True
+        )
         return
 
     if captchas[uid]["code"] == code.upper().strip():
+        # Supprimer le captcha des données
         del captchas[uid]
         save_data("data/captchas.json", captchas)
 
+        # Retirer le rôle non-vérifié
         unverified_role = interaction.guild.get_role(UNVERIFIED_ROLE)
         if unverified_role and unverified_role in interaction.user.roles:
             await interaction.user.remove_roles(unverified_role)
 
+        # Ajouter le rôle vérifié
         verified_role = interaction.guild.get_role(VERIFIED_ROLE)
         if verified_role:
             await interaction.user.add_roles(verified_role)
 
-        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
-        if verification_channel:
-            try:
-                async for msg in verification_channel.history(limit=50):
-                    if (
-                        (msg.author == bot.user and interaction.user.mentioned_in(msg))
-                        or (msg.author == interaction.user)
-                    ):
-                        await msg.delete()
-            except Exception:
-                pass
-
+        # Répondre en éphémère AVANT de supprimer les messages (évite le timeout)
         embed = discord.Embed(
             title="✅ Vérification réussie !",
             description="Bienvenue sur **Revital RP** !\n\nTu as maintenant accès à l'ensemble du serveur. 🎉",
@@ -963,11 +958,45 @@ async def verify(interaction: discord.Interaction, code: str):
         )
         embed.set_footer(text="Bon jeu sur Revital RP !")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Supprimer tous les messages liés à ce membre dans #verification
+        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
+        if verification_channel:
+            try:
+                to_delete = []
+                async for msg in verification_channel.history(limit=100):
+                    # Message du bot mentionnant ce membre (captcha + ping d'arrivée)
+                    if msg.author == bot.user and interaction.user.mentioned_in(msg):
+                        to_delete.append(msg)
+                    # Commande /verify tapée par le membre (si visible)
+                    elif msg.author == interaction.user:
+                        to_delete.append(msg)
+                for msg in to_delete:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     else:
         captchas[uid]["attempts"] = captchas[uid].get("attempts", 0) + 1
         save_data("data/captchas.json", captchas)
         attempts = captchas[uid]["attempts"]
-        await interaction.response.send_message(f"❌ Code incorrect. Tentative {attempts}/5.", ephemeral=True)
+
+        if attempts >= 5:
+            # Trop de tentatives : supprimer le captcha et forcer à rejoindre à nouveau
+            del captchas[uid]
+            save_data("data/captchas.json", captchas)
+            await interaction.response.send_message(
+                "❌ Trop de tentatives incorrectes. Quitte et rejoins le serveur pour obtenir un nouveau code.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Code incorrect. Tentative **{attempts}/5**.",
+                ephemeral=True
+            )
 
 # ======================================================
 #  MODÉRATION
