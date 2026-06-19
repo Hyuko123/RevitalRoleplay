@@ -1,28 +1,55 @@
-# ========== CONFIGURATION REVITAL RP BOT ==========
-# Remplace les valeurs par celles de ton serveur
+"""
+Configuration Revital RP Bot — charge les valeurs depuis le fichier .env
+Copiez .env.example vers .env et remplissez vos IDs Discord.
+"""
 
-# === INFORMATIONS BOT ===
-TOKEN = "YOUR_TOKEN_HERE"  # Récupère sur https://discord.com/developers/applications
-GUILD_ID = 123456789  # ID de ton serveur (Clic droit sur le serveur > Copier l'ID serveur)
+import os
 
-# === CHANNELS ===
-LOGS_CHANNEL = 987654321         # Canal pour logs de modération (#logs-moderation)
-LOGS_WL_CHANNEL = 987654322      # Canal pour logs whitelist (#logs-wl)
-TICKETS_CHANNEL = 987654323      # Canal pour créer des tickets (#tickets)
-VERIFICATION_CHANNEL = 987654324 # Canal de vérification (#verification)
+from dotenv import load_dotenv
 
-# === RÔLES ===
-CITOYEN_WL_ROLE = 987654325  # Rôle "citoyen-wl"
-MUTED_ROLE = 987654326       # Rôle "Muted" (pour les mute temporaire)
-VERIFIED_ROLE = 987654327    # Rôle pour les utilisateurs vérifiés
+load_dotenv()
 
-# ========== HOW TO GET IDs ==========
-# 1. Activer Mode Développeur Discord:
-#    Paramètres > Avancé > Mode Développeur
-#
-# 2. Clic droit sur:
-#    - Channel → Copier l'ID du salon
-#    - Rôle → Copier l'ID du rôle
-#    - Serveur → Copier l'ID serveur
-#
-# 3. Remplir les valeurs ci-dessus
+
+def _int(key: str, default: int = 0) -> int:
+    value = os.getenv(key, "").strip()
+    if not value:
+        return default
+    return int(value)
+
+
+# ── BOT ──────────────────────────────────────────────────────
+TOKEN = os.getenv("DISCORD_TOKEN", "")
+GUILD_ID = _int("GUILD_ID")
+
+# ── CHANNELS LOGS ────────────────────────────────────────────
+LOGS_CHANNEL = _int("LOGS_CHANNEL")
+LOGS_WL_CHANNEL = _int("LOGS_WL_CHANNEL")
+LOGS_TICKETS_CHANNEL = _int("LOGS_TICKETS_CHANNEL")
+LOGS_REMBOURSEMENT_CHANNEL = _int("LOGS_REMBOURSEMENT_CHANNEL")
+
+# ── CHANNELS FONCTIONNELS ────────────────────────────────────
+VERIFICATION_CHANNEL = _int("VERIFICATION_CHANNEL")
+WELCOME_CHANNEL = _int("WELCOME_CHANNEL")
+
+# ── CATÉGORIE / TICKETS ──────────────────────────────────────
+TICKET_CATEGORY_ID = _int("TICKET_CATEGORY_ID")
+
+# Sous-catégories optionnelles par type de ticket (0 = utilise TICKET_CATEGORY_ID)
+TICKET_CHANNELS = {
+    "boutique": _int("TICKET_CHANNEL_BOUTIQUE"),
+    "superviseur": _int("TICKET_CHANNEL_SUPERVISEUR"),
+    "recrutement": _int("TICKET_CHANNEL_RECRUTEMENT"),
+    "legal": _int("TICKET_CHANNEL_LEGAL"),
+    "illegal": _int("TICKET_CHANNEL_ILLEGAL"),
+    "wiperp": _int("TICKET_CHANNEL_WIPERP"),
+}
+
+# ── RÔLES ────────────────────────────────────────────────────
+CITOYEN_WL_ROLE = _int("CITOYEN_WL_ROLE")
+MUTED_ROLE = _int("MUTED_ROLE")
+UNVERIFIED_ROLE = _int("UNVERIFIED_ROLE")
+VERIFIED_ROLE = _int("VERIFIED_ROLE")
+STAFF_ROLE = _int("STAFF_ROLE")
+
+# ── SANCTIONS AUTOMATIQUES ───────────────────────────────────
+AUTO_SANCTION_MUTE_DURATION = _int("AUTO_SANCTION_MUTE_DURATION", 3600)
