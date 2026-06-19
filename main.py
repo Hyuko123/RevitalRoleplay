@@ -200,7 +200,11 @@ class TicketCategorySelect(discord.ui.Select):
             overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
         target_cat_id = TICKET_CHANNELS.get(category)
-        target_category = guild.get_channel(target_cat_id) if target_cat_id else ticket_category
+        if target_cat_id:
+            target_category = guild.get_channel(target_cat_id) or ticket_category
+        else:
+            target_category = ticket_category
+        print(f"[TICKET] catégorie cible : {target_category} (ID: {target_cat_id})")
 
         channel = await guild.create_text_channel(
             name=f"{category}-{ticket_num:04d}-{creator.name[:10]}",
