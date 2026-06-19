@@ -828,13 +828,53 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """Assigne le rôle non-vérifié, envoie le captcha et message de bienvenue."""
+    """Assigne le rôle non-vérifié, envoie le captcha dans #verification et message de bienvenue."""
     try:
+        # 1. Rôle non-vérifié
         unverified_role = member.guild.get_role(UNVERIFIED_ROLE)
         if unverified_role:
             await member.add_roles(unverified_role)
             print(f"✅ Rôle non-vérifié assigné à {member.name}")
 
+        # 2. Générer le captcha
+        captcha_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        captchas = load_data("data/captchas.json")
+        captchas[str(member.id)] = {
+            "code":     captcha_code,
+            "created":  datetime.now().isoformat(),
+            "attempts": 0,
+            "msg_id":   None,
+        }
+        save_data("data/captchas.json", captchas)
+
+        # 3. Envoyer le captcha dans #verification et sauvegarder l'ID du message
+        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
+        if verification_channel:
+            embed_verif = discord.Embed(
+                title="🔐 Vérification — Revital RP",
+                description=(
+                    f"Bienvenue {member.mention} sur **Revital RP** !\n\n"
+                    f"Pour accéder au serveur, tu dois te vérifier.\n\n"
+                    f"📋 **Ton code de vérification :** `{captcha_code}`\n\n"
+                    f"✅ **Tape dans ce salon :**\n"
+                    f"```/verify {captcha_code}```\n\n"
+                    f"⏱️ _Ce code est valable 30 minutes._"
+                ),
+                color=discord.Color.blurple(),
+                timestamp=datetime.now()
+            )
+            embed_verif.set_thumbnail(url=member.display_avatar.url)
+            embed_verif.set_footer(text="Revital RP • Système de vérification automatique")
+
+            sent = await verification_channel.send(content=f"👋 {member.mention}", embed=embed_verif)
+
+            # Sauvegarder l'ID du message pour le supprimer après la vérification
+            captchas = load_data("data/captchas.json")
+            if str(member.id) in captchas:
+                captchas[str(member.id)]["msg_id"] = sent.id
+                save_data("data/captchas.json", captchas)
+
+        # 4. Message de bienvenue dans #bienvenue
         welcome_channel = bot.get_channel(WELCOME_CHANNEL)
         if welcome_channel:
             welcome_embed = discord.Embed(
@@ -849,45 +889,7 @@ async def on_member_join(member: discord.Member):
             )
             welcome_embed.set_thumbnail(url=member.display_avatar.url)
             welcome_embed.set_footer(text="Revital RP • Bienvenue !")
-
-            await welcome_channel.send(
-                content=f"👋 {member.mention}",
-                embed=welcome_embed
-            )
-
-        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
-        if not verification_channel:
-            return
-
-        captcha_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        captchas = load_data("data/captchas.json")
-        captchas[str(member.id)] = {
-            "code":     captcha_code,
-            "created":  datetime.now().isoformat(),
-            "attempts": 0
-        }
-        save_data("data/captchas.json", captchas)
-
-        embed = discord.Embed(
-            title="🔐 Vérification — Revital RP",
-            description=(
-                f"Bienvenue {member.mention} sur **Revital RP** !\n\n"
-                f"Pour accéder au serveur, tu dois te vérifier.\n\n"
-                f"📋 **Ton code de vérification :** `{captcha_code}`\n\n"
-                f"✅ **Utilise la commande :**\n"
-                f"```/verify {captcha_code}```\n\n"
-                f"⏱️ _Ce code est valable 30 minutes._"
-            ),
-            color=discord.Color.blurple(),
-            timestamp=datetime.now()
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Revital RP • Système de vérification automatique")
-
-        await verification_channel.send(
-            content=f"👋 {member.mention}",
-            embed=embed
-        )
+            await welcome_channel.send(content=f"👋 {member.mention}", embed=welcome_embed)
 
     except Exception as e:
         print(f"[on_member_join] Erreur : {e}")
@@ -936,7 +938,9 @@ async def verify(interaction: discord.Interaction, code: str):
         return
 
     if captchas[uid]["code"] == code.upper().strip():
-        # Supprimer le captcha des données
+        # Récupérer l'ID du message captcha AVANT de supprimer l'entrée
+        msg_id = captchas[uid].get("msg_id")
+
         del captchas[uid]
         save_data("data/captchas.json", captchas)
 
@@ -950,7 +954,7 @@ async def verify(interaction: discord.Interaction, code: str):
         if verified_role:
             await interaction.user.add_roles(verified_role)
 
-        # Répondre en éphémère AVANT de supprimer les messages (évite le timeout)
+        # Répondre en éphémère (la réponse /verify est déjà invisible côté Discord)
         embed = discord.Embed(
             title="✅ Vérification réussie !",
             description="Bienvenue sur **Revital RP** !\n\nTu as maintenant accès à l'ensemble du serveur. 🎉",
@@ -959,25 +963,15 @@ async def verify(interaction: discord.Interaction, code: str):
         embed.set_footer(text="Bon jeu sur Revital RP !")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        # Supprimer tous les messages liés à ce membre dans #verification
-        verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
-        if verification_channel:
-            try:
-                to_delete = []
-                async for msg in verification_channel.history(limit=100):
-                    # Message du bot mentionnant ce membre (captcha + ping d'arrivée)
-                    if msg.author == bot.user and interaction.user.mentioned_in(msg):
-                        to_delete.append(msg)
-                    # Commande /verify tapée par le membre (si visible)
-                    elif msg.author == interaction.user:
-                        to_delete.append(msg)
-                for msg in to_delete:
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        # Supprimer le message captcha du bot via son ID (fiable, pas de scan history)
+        if msg_id:
+            verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
+            if verification_channel:
+                try:
+                    msg_to_del = await verification_channel.fetch_message(msg_id)
+                    await msg_to_del.delete()
+                except Exception:
+                    pass
 
     else:
         captchas[uid]["attempts"] = captchas[uid].get("attempts", 0) + 1
