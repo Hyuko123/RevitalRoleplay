@@ -181,37 +181,46 @@ class TicketCategorySelect(discord.ui.Select):
         ]
         super().__init__(placeholder="📂 Choisir la catégorie du ticket...", options=options, min_values=1, max_values=1)
 
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        category = self.values[0]
-        guild = interaction.guild
-        creator = interaction.user
-        ticket_num = next_ticket_number()
+async def callback(self, interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    category = self.values[0]
+    guild = interaction.guild
+    creator = interaction.user
+    ticket_num = next_ticket_number()
 
-        ticket_category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+    # CORRECTION : Récupérer la catégorie par défaut
+    ticket_category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            creator: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-        }
-        staff_role = guild.get_role(STAFF_ROLE)
-        if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        creator: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+    }
+    staff_role = guild.get_role(STAFF_ROLE)
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        target_cat_id = TICKET_CHANNELS.get(category)
-        if target_cat_id:
-            target_category = guild.get_channel(target_cat_id) or ticket_category
-        else:
+    # CORRECTION : Récupérer l'ID de la catégorie spécifique pour ce type de ticket
+    target_cat_id = TICKET_CHANNELS.get(category, 0)
+    
+    # CORRECTION : Si une catégorie spécifique existe, l'utiliser, sinon utiliser la catégorie par défaut
+    if target_cat_id and target_cat_id != 0:
+        target_category = guild.get_channel(target_cat_id)
+        # Si la catégorie spécifique n'existe pas, utiliser la catégorie par défaut
+        if target_category is None:
+            print(f"[TICKET] ⚠️ Catégorie spécifique {target_cat_id} introuvable pour {category}, utilisation de la catégorie par défaut")
             target_category = ticket_category
-        print(f"[TICKET] catégorie cible : {target_category} (ID: {target_cat_id})")
+    else:
+        target_category = ticket_category
+    
+    print(f"[TICKET] Création ticket {category} dans catégorie : {target_category.name if target_category else 'Aucune'} (ID: {target_category.id if target_category else 'N/A'})")
 
-        channel = await guild.create_text_channel(
-            name=f"{category}-{ticket_num:04d}-{creator.name[:10]}",
-            category=target_category,
-            overwrites=overwrites,
-            topic=f"Ticket #{ticket_num:04d} • {CATEGORY_LABELS[category]} • Créé par {creator.name}"
-        )
+    channel = await guild.create_text_channel(
+        name=f"{category}-{ticket_num:04d}-{creator.name[:10]}",
+        category=target_category,
+        overwrites=overwrites,
+        topic=f"Ticket #{ticket_num:04d} • {CATEGORY_LABELS[category]} • Créé par {creator.name}"
+    )
 
         tickets = load_data("data/tickets.json")
         tickets[str(channel.id)] = {
