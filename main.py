@@ -45,12 +45,18 @@ DATA_FILES = {
 }
 
 def create_data_files():
+    """Crée les dossiers et fichiers JSON nécessaires."""
     os.makedirs("data", exist_ok=True)
     os.makedirs("data/transcripts", exist_ok=True)
+    
     for path, default in DATA_FILES.items():
         if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(default, f, indent=2, ensure_ascii=False)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(default, f, indent=2, ensure_ascii=False)
+                print(f"✅ Fichier créé : {path}")
+            except Exception as e:
+                print(f"❌ Erreur création {path} : {e}")
 
 def load_data(path: str):
     try:
@@ -111,24 +117,25 @@ CATEGORY_LABELS = {
 #  TRANSCRIPT HTML
 # ======================================================
 
-async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -> str:
-    """Génère un fichier HTML résumant uniquement la prise en charge et la fermeture du ticket."""
-    number = ticket_data.get("number", "?")
-    category = ticket_data.get("category", "")
-    category_label = CATEGORY_LABELS.get(category, category or "?")
-    creator_name = ticket_data.get("creator_name", "?")
-    created_at = ticket_data.get("created_at", "")
-    claimed_by_name = ticket_data.get("claimed_by_name") or "Non assigné"
-    closed_by = ticket_data.get("closed_by") or "?"
-    closed_at = ticket_data.get("closed_at") or datetime.now().isoformat()
+async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -> str | None:
+    """Génère un fichier HTML avec la prise en charge et fermeture du ticket."""
+    try:
+        number = ticket_data.get("number", "?")
+        category = ticket_data.get("category", "")
+        category_label = CATEGORY_LABELS.get(category, category or "?")
+        creator_name = ticket_data.get("creator_name", "?")
+        created_at = ticket_data.get("created_at", "")
+        claimed_by_name = ticket_data.get("claimed_by_name") or "Non assigné"
+        closed_by = ticket_data.get("closed_by") or "?"
+        closed_at = ticket_data.get("closed_at") or datetime.now().isoformat()
 
-    def fmt_dt(iso_str: str) -> str:
-        try:
-            return datetime.fromisoformat(iso_str).strftime("%d/%m/%Y %H:%M")
-        except Exception:
-            return iso_str or "?"
+        def fmt_dt(iso_str: str) -> str:
+            try:
+                return datetime.fromisoformat(iso_str).strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                return iso_str or "?"
 
-    html = f"""<!DOCTYPE html>
+        html = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
@@ -151,10 +158,24 @@ async def generate_transcript(channel: discord.TextChannel, ticket_data: dict) -
 </body>
 </html>"""
 
-    path = f"data/transcripts/{channel.name}.html"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html)
-    return path
+        # Assurer que le dossier existe
+        os.makedirs("data/transcripts", exist_ok=True)
+        
+        # Créer un nom de fichier sûr et unique
+        filename = f"ticket_{number:04d}_{int(datetime.now().timestamp())}.html"
+        path = os.path.join("data/transcripts", filename)
+        
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        
+        print(f"[TRANSCRIPT] ✅ Créé : {path}")
+        return path
+        
+    except Exception as e:
+        print(f"[TRANSCRIPT] ❌ Erreur : {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ======================================================
 #  TICKETS
@@ -244,6 +265,12 @@ class TicketCategorySelect(discord.ui.Select):
         await channel.send(embed=embed, view=view)
         await channel.send(f"{creator.mention}", delete_after=2)
 
+        # 🔔 PING DU STAFF
+        staff_role = guild.get_role(STAFF_ROLE)
+        if staff_role:
+            await channel.send(f"🔔 {staff_role.mention} — Nouveau ticket à traiter !")
+            print(f"[TICKET] ✅ Staff ping envoyé")
+
         log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
         if log_ch:
             log_embed = discord.Embed(
@@ -253,6 +280,8 @@ class TicketCategorySelect(discord.ui.Select):
                 timestamp=datetime.now()
             )
             await log_ch.send(embed=log_embed)
+        else:
+            print(f"[TICKET] ⚠️ Canal logs introuvable : {LOGS_TICKETS_CHANNEL}")
 
         await interaction.followup.send(f"✅ Ton ticket a été créé : {channel.mention}", ephemeral=True)
 
@@ -362,6 +391,7 @@ class TicketCloseConfirmView(discord.ui.View):
         save_data("data/tickets.json", tickets)
 
         try:
+            # Générer la transcription
             path = await generate_transcript(self.channel, self.ticket_data)
 
             log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
@@ -386,12 +416,23 @@ class TicketCloseConfirmView(discord.ui.View):
                     color=discord.Color.red(),
                     timestamp=datetime.now()
                 )
-                await log_ch.send(embed=embed, file=discord.File(path))
-                print(f"[TICKET CLOSE] ✅ Log envoyé dans {log_ch.id} pour le ticket {number_str}")
+                
+                # Envoyer avec le fichier si créé avec succès
+                if path and os.path.exists(path):
+                    try:
+                        await log_ch.send(embed=embed, file=discord.File(path))
+                        print(f"[TICKET CLOSE] ✅ Log + transcript envoyés pour {number_str}")
+                    except Exception as file_err:
+                        print(f"[TICKET CLOSE] ⚠️ Erreur envoi fichier : {file_err}")
+                        await log_ch.send(embed=embed)
+                else:
+                    await log_ch.send(embed=embed)
+                    print(f"[TICKET CLOSE] ⚠️ Log envoyé (transcript indisponible)")
             else:
-                print(f"[TICKET CLOSE] ❌ Impossible d'envoyer le log : salon {LOGS_TICKETS_CHANNEL} inaccessible")
+                print(f"[TICKET CLOSE] ❌ Canal logs inaccessible")
+                
         except Exception as e:
-            print(f"[TICKET CLOSE] ❌ Erreur lors de l'envoi du log/transcript : {e}")
+            print(f"[TICKET CLOSE] ❌ Erreur : {e}")
             import traceback
             traceback.print_exc()
 
@@ -603,6 +644,9 @@ class WhitelistStep2View(discord.ui.View):
         logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
         if logs_wl:
             await logs_wl.send(embed=log_embed)
+            print(f"[WHITELIST] ✅ Log envoyé pour {self.member.name}")
+        else:
+            print(f"[WHITELIST] ❌ Canal WL introuvable : {LOGS_WL_CHANNEL}")
 
         await interaction.response.send_message(
             f"{icons[self.decision]} Whitelist de {self.member.mention} : **{self.decision.upper()}**",
@@ -769,6 +813,9 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         logs_channel = bot.get_channel(LOGS_REMBOURSEMENT_CHANNEL)
         if logs_channel:
             await logs_channel.send(embed=embed)
+            print(f"[REMBOURSEMENT] ✅ Log envoyé")
+        else:
+            print(f"[REMBOURSEMENT] ❌ Canal remboursement introuvable : {LOGS_REMBOURSEMENT_CHANNEL}")
 
         await interaction.response.send_message(
             "✅ Remboursement enregistré",
