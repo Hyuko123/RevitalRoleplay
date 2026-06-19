@@ -286,13 +286,28 @@ class TicketPanelView(discord.ui.View):
             f"✅ **{interaction.user.mention}** a pris en charge ce ticket.", ephemeral=False
         )
 
-        log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
-        if log_ch:
-            number = ticket_data.get("number", "?")
-            category_label = CATEGORY_LABELS.get(ticket_data.get("category", ""), "?")
-            await log_ch.send(
-                f"✅ Ticket #{number:04d} ({category_label}) — {interaction.channel.mention} pris en charge par {interaction.user.mention}"
-            )
+        try:
+            log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
+            if log_ch is None:
+                try:
+                    log_ch = await bot.fetch_channel(LOGS_TICKETS_CHANNEL)
+                except Exception as fetch_err:
+                    print(f"[TICKET CLAIM] ❌ Salon logs introuvable (ID: {LOGS_TICKETS_CHANNEL}) : {fetch_err}")
+                    log_ch = None
+
+            if log_ch:
+                number = ticket_data.get("number", "?")
+                number_str = f"#{number:04d}" if isinstance(number, int) else f"#{number}"
+                category_label = CATEGORY_LABELS.get(ticket_data.get("category", ""), "?")
+                await log_ch.send(
+                    f"✅ Ticket {number_str} ({category_label}) — {interaction.channel.mention} pris en charge par {interaction.user.mention}"
+                )
+            else:
+                print(f"[TICKET CLAIM] ❌ Impossible d'envoyer le log : salon {LOGS_TICKETS_CHANNEL} inaccessible")
+        except Exception as e:
+            print(f"[TICKET CLAIM] ❌ Erreur lors de l'envoi du log : {e}")
+            import traceback
+            traceback.print_exc()
 
     @discord.ui.button(label="👤 Ajouter membre", style=discord.ButtonStyle.blurple, custom_id="ticket_add_member")
     async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -346,22 +361,39 @@ class TicketCloseConfirmView(discord.ui.View):
             self.ticket_data = tickets[key]
         save_data("data/tickets.json", tickets)
 
-        path = await generate_transcript(self.channel, self.ticket_data)
+        try:
+            path = await generate_transcript(self.channel, self.ticket_data)
 
-        log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
-        if log_ch:
-            embed = discord.Embed(
-                title="🔒 Ticket Fermé",
-                description=(
-                    f"**#{self.ticket_data.get('number', '?'):04d}** — {CATEGORY_LABELS.get(self.ticket_data.get('category', ''), '?')}\n"
-                    f"Créé par : **{self.ticket_data.get('creator_name', '?')}**\n"
-                    f"Fermé par : **{interaction.user.name}**\n"
-                    f"Pris en charge par : **{self.ticket_data.get('claimed_by_name', 'Non assigné')}**"
-                ),
-                color=discord.Color.red(),
-                timestamp=datetime.now()
-            )
-            await log_ch.send(embed=embed, file=discord.File(path))
+            log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
+            if log_ch is None:
+                try:
+                    log_ch = await bot.fetch_channel(LOGS_TICKETS_CHANNEL)
+                except Exception as fetch_err:
+                    print(f"[TICKET CLOSE] ❌ Salon logs introuvable (ID: {LOGS_TICKETS_CHANNEL}) : {fetch_err}")
+                    log_ch = None
+
+            if log_ch:
+                number = self.ticket_data.get("number", "?")
+                number_str = f"#{number:04d}" if isinstance(number, int) else f"#{number}"
+                embed = discord.Embed(
+                    title="🔒 Ticket Fermé",
+                    description=(
+                        f"**{number_str}** — {CATEGORY_LABELS.get(self.ticket_data.get('category', ''), '?')}\n"
+                        f"Créé par : **{self.ticket_data.get('creator_name', '?')}**\n"
+                        f"Fermé par : **{interaction.user.name}**\n"
+                        f"Pris en charge par : **{self.ticket_data.get('claimed_by_name', 'Non assigné')}**"
+                    ),
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                await log_ch.send(embed=embed, file=discord.File(path))
+                print(f"[TICKET CLOSE] ✅ Log envoyé dans {log_ch.id} pour le ticket {number_str}")
+            else:
+                print(f"[TICKET CLOSE] ❌ Impossible d'envoyer le log : salon {LOGS_TICKETS_CHANNEL} inaccessible")
+        except Exception as e:
+            print(f"[TICKET CLOSE] ❌ Erreur lors de l'envoi du log/transcript : {e}")
+            import traceback
+            traceback.print_exc()
 
         await self.channel.delete(reason=f"Ticket fermé par {interaction.user.name}")
 
