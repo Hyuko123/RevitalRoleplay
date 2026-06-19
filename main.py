@@ -94,7 +94,7 @@ def fmt_duration(seconds: int) -> str:
         return f"{seconds // 86400}j"
 
 def is_staff(interaction: discord.Interaction) -> bool:
-    """Vérifie si l'utilisateur possède le rôle STAFF_ROLE (1516284938645798953)."""
+    """Vérifie si l'utilisateur possède le rôle STAFF_ROLE."""
     staff_role = interaction.guild.get_role(STAFF_ROLE)
     return staff_role is not None and staff_role in interaction.user.roles
 
@@ -122,7 +122,6 @@ async def generate_transcript(channel: discord.TextChannel) -> str:
         avatar = msg.author.display_avatar.url if msg.author.display_avatar else ""
         ts = msg.created_at.strftime("%d/%m/%Y %H:%M")
         content = discord.utils.escape_mentions(msg.content or "")
-        # Embeds
         embed_html = ""
         for emb in msg.embeds:
             title = emb.title or ""
@@ -167,11 +166,7 @@ async def generate_transcript(channel: discord.TextChannel) -> str:
     return path
 
 # ======================================================
-#  (AutoMod désactivé — les warns sont purement visuels)
-# ======================================================
-
-# ======================================================
-#  ██████╗ TICKETS
+#  TICKETS
 # ======================================================
 
 class TicketCategorySelect(discord.ui.Select):
@@ -193,10 +188,8 @@ class TicketCategorySelect(discord.ui.Select):
         creator = interaction.user
         ticket_num = next_ticket_number()
 
-        # Catégorie Discord cible
         ticket_category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
 
-        # Overwrites : seul le créateur + staff voient le salon
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             creator: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -206,7 +199,6 @@ class TicketCategorySelect(discord.ui.Select):
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        # Si un salon spécifique est configuré pour cette catégorie, override
         target_cat_id = TICKET_CHANNELS.get(category)
         target_category = guild.get_channel(target_cat_id) if target_cat_id else ticket_category
 
@@ -217,7 +209,6 @@ class TicketCategorySelect(discord.ui.Select):
             topic=f"Ticket #{ticket_num:04d} • {CATEGORY_LABELS[category]} • Créé par {creator.name}"
         )
 
-        # Enregistrement
         tickets = load_data("data/tickets.json")
         tickets[str(channel.id)] = {
             "number":       ticket_num,
@@ -232,7 +223,6 @@ class TicketCategorySelect(discord.ui.Select):
         }
         save_data("data/tickets.json", tickets)
 
-        # Embed d'accueil
         embed = discord.Embed(
             title=f"🎫 Ticket #{ticket_num:04d} — {CATEGORY_LABELS[category]}",
             description=(
@@ -250,7 +240,6 @@ class TicketCategorySelect(discord.ui.Select):
         await channel.send(embed=embed, view=view)
         await channel.send(f"{creator.mention}", delete_after=2)
 
-        # Log création
         log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
         if log_ch:
             log_embed = discord.Embed(
@@ -265,14 +254,12 @@ class TicketCategorySelect(discord.ui.Select):
 
 
 class TicketOpenView(discord.ui.View):
-    """Vue persistante affichée dans le salon #tickets."""
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketCategorySelect())
 
 
 class TicketPanelView(discord.ui.View):
-    """Panel de contrôle dans le salon du ticket."""
     def __init__(self, channel_id: int):
         super().__init__(timeout=None)
         self.channel_id = channel_id
@@ -330,9 +317,6 @@ class TicketPanelView(discord.ui.View):
             return
 
         ticket_data = tickets[key]
-        creator = interaction.guild.get_member(ticket_data["creator_id"])
-
-        # Confirmation
         confirm_view = TicketCloseConfirmView(interaction.channel, ticket_data)
         await interaction.response.send_message(
             "⚠️ Es-tu sûr de vouloir fermer ce ticket ?",
@@ -351,10 +335,8 @@ class TicketCloseConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
-        # Transcript
         path = await generate_transcript(self.channel)
 
-        # Mise à jour données
         tickets = load_data("data/tickets.json")
         key = str(self.channel.id)
         if key in tickets:
@@ -363,7 +345,6 @@ class TicketCloseConfirmView(discord.ui.View):
             tickets[key]["closed_by"] = interaction.user.name
         save_data("data/tickets.json", tickets)
 
-        # Log fermeture
         log_ch = bot.get_channel(LOGS_TICKETS_CHANNEL)
         if log_ch:
             embed = discord.Embed(
@@ -428,12 +409,7 @@ class ReassignModal(discord.ui.Modal, title="Réassigner le ticket"):
 
 
 # ======================================================
-#  ██╗    ██╗██╗  ██╗██╗████████╗███████╗██╗     ██╗███████╗████████╗
-#  ██║    ██║██║  ██║██║╚══██╔══╝██╔════╝██║     ██║██╔════╝╚══██╔══╝
-#  ██║ █╗ ██║███████║██║   ██║   █████╗  ██║     ██║███████╗   ██║
-#  ██║███╗██║██╔══██║██║   ██║   ██╔══╝  ██║     ██║╚════██║   ██║
-#  ╚███╔███╔╝██║  ██║██║   ██║   ███████╗███████╗██║███████║   ██║
-#   ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚══════╝╚═╝╚══════╝   ╚═╝
+#  WHITELIST
 # ======================================================
 
 WL_ROLES = {
@@ -451,7 +427,6 @@ class WhitelistStep1Modal(discord.ui.Modal, title="Whitelist — Étape 1 / 2 : 
         self.member = member
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Passer les données à l'étape 2
         view = WhitelistStep2View(
             self.member,
             {
@@ -478,7 +453,7 @@ class WhitelistStep2View(discord.ui.View):
         super().__init__(timeout=300)
         self.member    = member
         self.step1     = step1_data
-        self.type_wl   = None   # legal / illegal
+        self.type_wl   = None
         self.background_ok = None
         self.reglement_ok  = None
         self.decision       = None
@@ -538,11 +513,9 @@ class WhitelistStep2View(discord.ui.View):
             await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
             return
 
-        # Enregistrement
         wl_data = load_data("data/whitelist.json")
         user_key = str(self.member.id)
 
-        # Historique : on conserve les anciennes entrées
         if user_key not in wl_data:
             wl_data[user_key] = {"entries": [], "current": None}
 
@@ -564,7 +537,6 @@ class WhitelistStep2View(discord.ui.View):
         wl_data[user_key]["current"] = entry
         save_data("data/whitelist.json", wl_data)
 
-        # Gestion du rôle
         if self.decision == "accepte":
             wl_role = interaction.guild.get_role(CITOYEN_WL_ROLE)
             if wl_role:
@@ -573,11 +545,9 @@ class WhitelistStep2View(discord.ui.View):
                 except Exception:
                     pass
 
-        # Couleur selon décision
         colors = {"accepte": discord.Color.green(), "refuse": discord.Color.red(), "attente": discord.Color.gold()}
         icons  = {"accepte": "✅", "refuse": "❌", "attente": "⏳"}
 
-        # Log #logs-wl
         log_embed = discord.Embed(
             title=f"{icons[self.decision]} Whitelist {self.decision.upper()} — {self.step1['nom_rp']}",
             color=colors[self.decision],
@@ -605,7 +575,7 @@ class WhitelistStep2View(discord.ui.View):
         )
 
 # ======================================================
-#  DICTIONNAIRE COULEURS POUR BROADCAST
+#  BROADCAST
 # ======================================================
 
 ANNONCE_COLORS = {
@@ -619,10 +589,6 @@ ANNONCE_COLORS = {
 }
 
 
-# ======================================================
-#  MODAL & COMMANDE BROADCAST
-# ======================================================
-
 class AnnonceModal(discord.ui.Modal, title="📢 Créer un Broadcast"):
     titre = discord.ui.TextInput(
         label="Titre de l'annonce",
@@ -630,7 +596,7 @@ class AnnonceModal(discord.ui.Modal, title="📢 Créer un Broadcast"):
         required=True,
         max_length=256
     )
-    
+
     message = discord.ui.TextInput(
         label="Message principal",
         placeholder="Votre message ici...",
@@ -638,14 +604,14 @@ class AnnonceModal(discord.ui.Modal, title="📢 Créer un Broadcast"):
         required=True,
         max_length=4000
     )
-    
+
     image_url = discord.ui.TextInput(
         label="URL de l'image (optionnel)",
         placeholder="https://exemple.com/image.png",
         required=False,
         max_length=500
     )
-    
+
     couleur = discord.ui.TextInput(
         label="Couleur (Bleu/Vert/Rouge/Orange/Violet/Jaune)",
         placeholder="Bleu",
@@ -653,11 +619,11 @@ class AnnonceModal(discord.ui.Modal, title="📢 Créer un Broadcast"):
         max_length=20,
         default="Bleu"
     )
-    
+
     def __init__(self, channel: discord.TextChannel):
         super().__init__()
         self.channel = channel
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             color_name = self.couleur.value.strip().capitalize()
@@ -704,12 +670,12 @@ async def bc(interaction: discord.Interaction, salon: discord.TextChannel):
     if not is_staff(interaction):
         await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
         return
-    
+
     modal = AnnonceModal(salon)
     await interaction.response.send_modal(modal)
 
 # ======================================================
-#  SYSTÈME DE REMBOURSEMENT
+#  REMBOURSEMENT
 # ======================================================
 
 class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
@@ -719,14 +685,14 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         required=True,
         max_length=150
     )
-    
+
     date_heure = discord.ui.TextInput(
         label="Date et Heure",
         placeholder="Ex: 18/06/2026 à 14h30",
         required=True,
         max_length=100
     )
-    
+
     note_remboursement = discord.ui.TextInput(
         label="Note de remboursement",
         placeholder="Raison du remboursement...",
@@ -734,11 +700,10 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         required=True,
         max_length=1000
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
-        # Enregistrer le remboursement
         remboursements = load_data("data/remboursements.json")
-        
+
         timestamp = datetime.now().isoformat()
         entry = {
             "nom_prenom_rp": self.nom_prenom_rp.value,
@@ -748,15 +713,13 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
             "staff_id": interaction.user.id,
             "date_creation": timestamp,
         }
-        
-        # Utiliser le timestamp comme clé unique
+
         if "all" not in remboursements:
             remboursements["all"] = []
-        
+
         remboursements["all"].append(entry)
         save_data("data/remboursements.json", remboursements)
-        
-        # Créer l'embed pour les logs
+
         embed = discord.Embed(
             title="💰 Nouveau Remboursement",
             color=discord.Color.gold(),
@@ -767,15 +730,13 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         embed.add_field(name="📝 Note", value=self.note_remboursement.value, inline=False)
         embed.add_field(name="👮 Traité par", value=f"{interaction.user.mention}", inline=False)
         embed.set_footer(text=f"Remboursement #{len(remboursements['all'])}")
-        
-        # Envoyer dans le salon de logs
+
         logs_channel = bot.get_channel(LOGS_REMBOURSEMENT_CHANNEL)
         if logs_channel:
             await logs_channel.send(embed=embed)
-        
-        # Confirmer à l'utilisateur
+
         await interaction.response.send_message(
-            f"✅ Remboursement enregistré",
+            "✅ Remboursement enregistré",
             ephemeral=True
         )
 
@@ -788,13 +749,13 @@ async def remboursement(interaction: discord.Interaction):
     if not is_staff(interaction):
         await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
         return
-    
+
     modal = RemboursementModal()
     await interaction.response.send_modal(modal)
-    
+
 
 # ======================================================
-#  COMMANDE — CLEAR MESSAGES
+#  CLEAR MESSAGES
 # ======================================================
 
 @tree.command(
@@ -808,34 +769,29 @@ async def clear(interaction: discord.Interaction, nombre: int):
     if not is_staff(interaction):
         await interaction.response.send_message("❌ Accès refusé.", ephemeral=True)
         return
-    
-    # Vérifier que le nombre est valide
+
     if nombre < 1 or nombre > 100:
         await interaction.response.send_message(
             "❌ Le nombre doit être entre 1 et 100.",
             ephemeral=True
         )
         return
-    
-    # Répondre immédiatement pour éviter le timeout
+
     await interaction.response.send_message(
         f"🗑️ Suppression de {nombre} message(s) en cours...",
         ephemeral=True
     )
-    
+
     try:
-        # Supprimer les messages
         deleted = await interaction.channel.purge(limit=nombre)
-        
-        # Envoyer un message de confirmation (qui s'auto-supprimera)
+
         confirm_msg = await interaction.channel.send(
             f"✅ {len(deleted)} message(s) supprimé(s) par {interaction.user.mention}"
         )
-        
-        # Supprimer le message de confirmation après 5 secondes
+
         await asyncio.sleep(5)
         await confirm_msg.delete()
-        
+
     except Exception as e:
         await interaction.followup.send(
             f"❌ Erreur lors de la suppression : {str(e)}",
@@ -851,7 +807,6 @@ async def on_ready():
     print(f"✅ Bot connecté : {bot.user}")
 
     try:
-        # Synchroniser sur le serveur spécifique (apparition instantanée)
         guild = discord.Object(id=GUILD_ID)
         tree.copy_global_to(guild=guild)
         synced = await tree.sync(guild=guild)
@@ -875,13 +830,11 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     """Assigne le rôle non-vérifié, envoie le captcha et message de bienvenue."""
     try:
-        # 1. Assigner le rôle non-vérifié
         unverified_role = member.guild.get_role(UNVERIFIED_ROLE)
         if unverified_role:
             await member.add_roles(unverified_role)
             print(f"✅ Rôle non-vérifié assigné à {member.name}")
-        
-        # 2. Message de bienvenue dans le salon dédié
+
         welcome_channel = bot.get_channel(WELCOME_CHANNEL)
         if welcome_channel:
             welcome_embed = discord.Embed(
@@ -896,13 +849,12 @@ async def on_member_join(member: discord.Member):
             )
             welcome_embed.set_thumbnail(url=member.display_avatar.url)
             welcome_embed.set_footer(text="Revital RP • Bienvenue !")
-            
+
             await welcome_channel.send(
                 content=f"👋 {member.mention}",
                 embed=welcome_embed
             )
-        
-        # 3. Générer le captcha
+
         verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
         if not verification_channel:
             return
@@ -916,7 +868,6 @@ async def on_member_join(member: discord.Member):
         }
         save_data("data/captchas.json", captchas)
 
-        # 4. Envoyer le captcha avec ping
         embed = discord.Embed(
             title="🔐 Vérification — Revital RP",
             description=(
@@ -932,12 +883,12 @@ async def on_member_join(member: discord.Member):
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="Revital RP • Système de vérification automatique")
-        
+
         await verification_channel.send(
             content=f"👋 {member.mention}",
             embed=embed
         )
-        
+
     except Exception as e:
         print(f"[on_member_join] Erreur : {e}")
 
@@ -949,7 +900,7 @@ async def on_member_remove(member: discord.Member):
         welcome_channel = bot.get_channel(WELCOME_CHANNEL)
         if not welcome_channel:
             return
-        
+
         leave_embed = discord.Embed(
             title="👋 Au revoir !",
             description=(
@@ -961,15 +912,14 @@ async def on_member_remove(member: discord.Member):
         )
         leave_embed.set_thumbnail(url=member.display_avatar.url)
         leave_embed.set_footer(text="Revital RP • À bientôt !")
-        
-        # Pas de mention pour les départs
+
         await welcome_channel.send(embed=leave_embed)
-        
+
     except Exception as e:
         print(f"[on_member_remove] Erreur : {e}")
 
 # ======================================================
-#  COMMANDES — VÉRIFICATION
+#  VÉRIFICATION
 # ======================================================
 
 @tree.command(name="verify", description="Vérifier ton compte avec le code captcha")
@@ -983,26 +933,25 @@ async def verify(interaction: discord.Interaction, code: str):
         return
 
     if captchas[uid]["code"] == code.upper().strip():
-        # Code correct
         del captchas[uid]
         save_data("data/captchas.json", captchas)
-        
-        # Retirer le rôle non-vérifié
+
         unverified_role = interaction.guild.get_role(UNVERIFIED_ROLE)
         if unverified_role and unverified_role in interaction.user.roles:
             await interaction.user.remove_roles(unverified_role)
-        
-        # Ajouter le rôle vérifié
+
         verified_role = interaction.guild.get_role(VERIFIED_ROLE)
         if verified_role:
             await interaction.user.add_roles(verified_role)
 
-        # Supprimer les messages du captcha dans #verification
         verification_channel = bot.get_channel(VERIFICATION_CHANNEL)
         if verification_channel:
             try:
                 async for msg in verification_channel.history(limit=50):
-                    if (msg.author == bot.user and interaction.user.mentioned_in(msg)) or                        (msg.author == interaction.user):
+                    if (
+                        (msg.author == bot.user and interaction.user.mentioned_in(msg))
+                        or (msg.author == interaction.user)
+                    ):
                         await msg.delete()
             except Exception:
                 pass
@@ -1021,7 +970,7 @@ async def verify(interaction: discord.Interaction, code: str):
         await interaction.response.send_message(f"❌ Code incorrect. Tentative {attempts}/5.", ephemeral=True)
 
 # ======================================================
-#  COMMANDES — MODÉRATION
+#  MODÉRATION
 # ======================================================
 
 @tree.command(name="warn", description="Ajouter un warn à un membre")
@@ -1081,7 +1030,7 @@ async def warns_cmd(interaction: discord.Interaction, member: discord.Member = N
         description=f"**{len(user_warns)} avertissement(s)** au total",
         color=discord.Color.orange()
     )
-    for i, w in enumerate(user_warns[-10:], 1):  # 10 derniers max
+    for i, w in enumerate(user_warns[-10:], 1):
         embed.add_field(
             name=f"Warn #{i} — {w.get('type', 'Discord')}",
             value=f"📋 {w['reason']}\n👮 {w['moderator']} • 📅 {w['date'][:10]}",
@@ -1141,14 +1090,12 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     )
     embed.set_thumbnail(url=member.display_avatar.url)
 
-    # Warns
     user_warns = warns_data.get(str(member.id), [])
     warn_text = "\n".join(
         [f"• [{w.get('type','?')}] {w['reason']} — {w['date'][:10]} (par {w['moderator']})" for w in user_warns[-5:]]
     ) or "Aucun warn"
     embed.add_field(name=f"⚠️ Warns ({len(user_warns)})", value=warn_text, inline=False)
 
-    # Whitelist
     wl = wl_data.get(str(member.id))
     if wl:
         current = wl.get("current", {})
@@ -1165,7 +1112,6 @@ async def history(interaction: discord.Interaction, member: discord.Member):
     else:
         embed.add_field(name="✅ Whitelist", value="Non whitelisté", inline=False)
 
-    # Mute actif
     mute = mutes_data.get(str(member.id))
     if mute:
         embed.add_field(
@@ -1264,7 +1210,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, raison: 
 
 
 # ======================================================
-#  COMMANDES — WHITELIST
+#  WHITELIST COMMANDS
 # ======================================================
 
 @tree.command(name="whitelist", description="Ouvrir le formulaire de whitelist pour un joueur")
@@ -1358,7 +1304,6 @@ async def wl_revoke(interaction: discord.Interaction, member: discord.Member, ra
         await interaction.response.send_message(f"❌ {member.mention} n'est pas whitelisté.", ephemeral=True)
         return
 
-    # Marque comme révoqué
     revoke_entry = {
         "nom_rp":    wl_data[uid].get("current", {}).get("nom_rp", "?"),
         "decision":  "revoque",
@@ -1370,12 +1315,10 @@ async def wl_revoke(interaction: discord.Interaction, member: discord.Member, ra
     wl_data[uid]["current"] = revoke_entry
     save_data("data/whitelist.json", wl_data)
 
-    # Retire le rôle
     wl_role = interaction.guild.get_role(CITOYEN_WL_ROLE)
     if wl_role and wl_role in member.roles:
         await member.remove_roles(wl_role)
 
-    # Log
     embed = discord.Embed(
         title="🚫 Whitelist Révoquée",
         description=f"{member.mention} (`{member.id}`)\nRaison : {raison}\nPar : {interaction.user.mention}",
@@ -1389,7 +1332,7 @@ async def wl_revoke(interaction: discord.Interaction, member: discord.Member, ra
 
 
 # ======================================================
-#  COMMANDES — TICKETS
+#  TICKET COMMANDS
 # ======================================================
 
 @tree.command(name="setup-tickets", description="Configurer le panneau de création de tickets")
@@ -1438,7 +1381,7 @@ async def ticket_close(interaction: discord.Interaction):
 
 
 # ======================================================
-#  BOUCLE — MUTES EXPIRÉS
+#  MUTES EXPIRÉS
 # ======================================================
 
 @tasks.loop(seconds=15)
@@ -1473,11 +1416,11 @@ async def check_mutes():
 
 if __name__ == "__main__":
     create_data_files()
-    
+
     if not TOKEN:
         print("❌ ERREUR: Le token Discord n'est pas configuré!")
         print("📝 Créez un fichier .env et ajoutez votre token Discord")
         print("💡 Voir .env.example pour un exemple")
         exit(1)
-    
+
     bot.run(TOKEN)
