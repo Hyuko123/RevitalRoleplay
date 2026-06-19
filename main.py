@@ -641,19 +641,27 @@ class WhitelistStep2View(discord.ui.View):
         log_embed.set_thumbnail(url=self.member.display_avatar.url)
         log_embed.set_footer(text=f"Entrée #{len(wl_data[user_key]['entries'])} pour ce joueur")
 
+        print(f"[WHITELIST] 🔍 Tentative d'envoi du log vers channel ID: {LOGS_WL_CHANNEL}")
         logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
+        print(f"[WHITELIST] 🔍 get_channel result: {logs_wl}")
+        
         if logs_wl is None:
             try:
+                print(f"[WHITELIST] 🔍 Tentative fetch_channel...")
                 logs_wl = await bot.fetch_channel(LOGS_WL_CHANNEL)
+                print(f"[WHITELIST] 🔍 fetch_channel result: {logs_wl}")
             except Exception as fetch_err:
                 print(f"[WHITELIST] ❌ Salon logs introuvable (ID: {LOGS_WL_CHANNEL}) : {fetch_err}")
                 logs_wl = None
         
         if logs_wl:
-            await logs_wl.send(embed=log_embed)
-            print(f"[WHITELIST] ✅ Log envoyé pour {self.member.name}")
+            try:
+                await logs_wl.send(embed=log_embed)
+                print(f"[WHITELIST] ✅ Log envoyé avec succès vers {logs_wl.name} pour {self.member.name}")
+            except Exception as send_err:
+                print(f"[WHITELIST] ❌ Erreur lors de l'envoi: {send_err}")
         else:
-            print(f"[WHITELIST] ❌ Canal WL inaccessible")
+            print(f"[WHITELIST] ❌ Canal WL inaccessible (ID: {LOGS_WL_CHANNEL})")
 
         await interaction.response.send_message(
             f"{icons[self.decision]} Whitelist de {self.member.mention} : **{self.decision.upper()}**",
@@ -817,19 +825,27 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         embed.add_field(name="👮 Traité par", value=f"{interaction.user.mention}", inline=False)
         embed.set_footer(text=f"Remboursement #{len(remboursements['all'])}")
 
+        print(f"[REMBOURSEMENT] 🔍 Tentative d'envoi du log vers channel ID: {LOGS_REMBOURSEMENT_CHANNEL}")
         logs_channel = bot.get_channel(LOGS_REMBOURSEMENT_CHANNEL)
+        print(f"[REMBOURSEMENT] 🔍 get_channel result: {logs_channel}")
+        
         if logs_channel is None:
             try:
+                print(f"[REMBOURSEMENT] 🔍 Tentative fetch_channel...")
                 logs_channel = await bot.fetch_channel(LOGS_REMBOURSEMENT_CHANNEL)
+                print(f"[REMBOURSEMENT] 🔍 fetch_channel result: {logs_channel}")
             except Exception as fetch_err:
                 print(f"[REMBOURSEMENT] ❌ Salon logs introuvable (ID: {LOGS_REMBOURSEMENT_CHANNEL}) : {fetch_err}")
                 logs_channel = None
         
         if logs_channel:
-            await logs_channel.send(embed=embed)
-            print(f"[REMBOURSEMENT] ✅ Log envoyé")
+            try:
+                await logs_channel.send(embed=embed)
+                print(f"[REMBOURSEMENT] ✅ Log envoyé avec succès vers {logs_channel.name}")
+            except Exception as send_err:
+                print(f"[REMBOURSEMENT] ❌ Erreur lors de l'envoi: {send_err}")
         else:
-            print(f"[REMBOURSEMENT] ❌ Canal remboursement inaccessible")
+            print(f"[REMBOURSEMENT] ❌ Canal remboursement inaccessible (ID: {LOGS_REMBOURSEMENT_CHANNEL})")
 
         await interaction.response.send_message(
             "✅ Remboursement enregistré",
