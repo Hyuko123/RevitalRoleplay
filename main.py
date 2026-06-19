@@ -642,11 +642,18 @@ class WhitelistStep2View(discord.ui.View):
         log_embed.set_footer(text=f"Entrée #{len(wl_data[user_key]['entries'])} pour ce joueur")
 
         logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
+        if logs_wl is None:
+            try:
+                logs_wl = await bot.fetch_channel(LOGS_WL_CHANNEL)
+            except Exception as fetch_err:
+                print(f"[WHITELIST] ❌ Salon logs introuvable (ID: {LOGS_WL_CHANNEL}) : {fetch_err}")
+                logs_wl = None
+        
         if logs_wl:
             await logs_wl.send(embed=log_embed)
             print(f"[WHITELIST] ✅ Log envoyé pour {self.member.name}")
         else:
-            print(f"[WHITELIST] ❌ Canal WL introuvable : {LOGS_WL_CHANNEL}")
+            print(f"[WHITELIST] ❌ Canal WL inaccessible")
 
         await interaction.response.send_message(
             f"{icons[self.decision]} Whitelist de {self.member.mention} : **{self.decision.upper()}**",
@@ -811,11 +818,18 @@ class RemboursementModal(discord.ui.Modal, title="💰 Remboursement"):
         embed.set_footer(text=f"Remboursement #{len(remboursements['all'])}")
 
         logs_channel = bot.get_channel(LOGS_REMBOURSEMENT_CHANNEL)
+        if logs_channel is None:
+            try:
+                logs_channel = await bot.fetch_channel(LOGS_REMBOURSEMENT_CHANNEL)
+            except Exception as fetch_err:
+                print(f"[REMBOURSEMENT] ❌ Salon logs introuvable (ID: {LOGS_REMBOURSEMENT_CHANNEL}) : {fetch_err}")
+                logs_channel = None
+        
         if logs_channel:
             await logs_channel.send(embed=embed)
             print(f"[REMBOURSEMENT] ✅ Log envoyé")
         else:
-            print(f"[REMBOURSEMENT] ❌ Canal remboursement introuvable : {LOGS_REMBOURSEMENT_CHANNEL}")
+            print(f"[REMBOURSEMENT] ❌ Canal remboursement inaccessible")
 
         await interaction.response.send_message(
             "✅ Remboursement enregistré",
@@ -1451,8 +1465,19 @@ async def wl_revoke(interaction: discord.Interaction, member: discord.Member, ra
         timestamp=datetime.now()
     )
     logs_wl = bot.get_channel(LOGS_WL_CHANNEL)
+    if logs_wl is None:
+        try:
+            logs_wl = await bot.fetch_channel(LOGS_WL_CHANNEL)
+        except Exception as fetch_err:
+            print(f"[WL-REVOKE] ❌ Salon logs introuvable (ID: {LOGS_WL_CHANNEL}) : {fetch_err}")
+            logs_wl = None
+    
     if logs_wl:
         await logs_wl.send(embed=embed)
+        print(f"[WL-REVOKE] ✅ Log envoyé pour {member.name}")
+    else:
+        print(f"[WL-REVOKE] ❌ Canal WL inaccessible")
+    
     await interaction.response.send_message(embed=embed)
 
 
