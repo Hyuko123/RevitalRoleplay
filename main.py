@@ -181,7 +181,7 @@ class TicketCategorySelect(discord.ui.Select):
         ]
         super().__init__(placeholder="📂 Choisir la catégorie du ticket...", options=options, min_values=1, max_values=1)
 
-async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         category = self.values[0]
         guild = interaction.guild
@@ -200,20 +200,20 @@ async def callback(self, interaction: discord.Interaction):
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-   # Récupérer l'ID de la catégorie spécifique pour ce type de ticket
-target_cat_id = TICKET_CHANNELS.get(category, 0)
+        # Récupérer l'ID de la catégorie spécifique pour ce type de ticket
+        target_cat_id = TICKET_CHANNELS.get(category, 0)
 
-# Si une catégorie spécifique existe, l'utiliser, sinon utiliser la catégorie par défaut
-if target_cat_id and target_cat_id != 0:
-    target_category = guild.get_channel(target_cat_id)
-    # Si la catégorie spécifique n'existe pas, utiliser la catégorie par défaut
-    if target_category is None:
-        print(f"[TICKET] ⚠️ Catégorie {target_cat_id} introuvable pour {category}, utilisation par défaut")
-        target_category = ticket_category
-else:
-    target_category = ticket_category
+        # Si une catégorie spécifique existe, l'utiliser, sinon utiliser la catégorie par défaut
+        if target_cat_id and target_cat_id != 0:
+            target_category = guild.get_channel(target_cat_id)
+            # Si la catégorie spécifique n'existe pas, utiliser la catégorie par défaut
+            if target_category is None:
+                print(f"[TICKET] ⚠️ Catégorie {target_cat_id} introuvable pour {category}, utilisation par défaut")
+                target_category = ticket_category
+        else:
+            target_category = ticket_category
 
-print(f"[TICKET] Création ticket {category} dans : {target_category.name if target_category else 'Aucune'}")
+        print(f"[TICKET] Création ticket {category} dans : {target_category.name if target_category else 'Aucune'}")
 
         channel = await guild.create_text_channel(
             name=f"{category}-{ticket_num:04d}-{creator.name[:10]}",
